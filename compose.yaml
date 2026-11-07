@@ -1,0 +1,40 @@
+services:
+  api:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    init: true
+    secrets:
+      - app_password
+    volumes:
+      - chat_data:/app/data
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 20s
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - '7456:80'
+    depends_on:
+      api:
+        condition: service_healthy
+secrets:
+  app_password:
+    file: ./secrets/app-password.txt
+volumes:
+  chat_data:

@@ -1,0 +1,92 @@
+# ChatAnalyzer · 对话观察室
+
+面向局域网的单用户对话分析应用。React + TypeScript 单页前端，独立 Node.js + TypeScript API，SQLite 持久化。界面参考 LiveGalGame_gc 的侧栏、对象档案、会话和设置布局，使用淡蓝与粉蓝配色；代码从头实现。
+
+## 能力
+
+- 自身称呼、多个别名、性格与风格；对象 QQ 绑定、标签、简介与共同群指定。
+- QQ 双向私聊及指定群的实时消息；新对象自动分页导入当前可读取的私聊历史，支持断点继续和重连补偿。
+- 三种独立资料：可修订、覆盖更新的长期沟通画像；带来源和时间的增量事件记忆；持续更新的当前会话摘要。
+- 轻量模型判断相关性、态度、情绪及变化；默认 20 条、双方静默 15 秒或明确变化时判断是否需要建议，无需建议也记录原因。
+- 需要建议才使用关键词及 90 天尺度的时间衰减检索历史，再交给完整模型分析。采用建议后默认冷却 10 分钟。
+- 新消息到来时取消旧请求并重新归纳未处理消息；暂停对象或会话可取消该范围所有 AI 请求，接收消息不受影响。
+- AI API 支持 OpenAI 兼容的 `/chat/completions` JSON 输出，可分别选择轻量与完整模型。
+
+不提供桌面客户端、音频、麦克风、移动客户端、对话分支或代发回复选项。微信接入见 [TODO.md](TODO.md)。网页会随窄窗口调整布局。
+
+## 两台主机的连接关系
+
+```text
+QQ 所在电脑：QQ + SnowLuma（登录仍由用户在原 QQ 客户端完成）
+                      │ OneBot v11 正向 WebSocket
+                      ▼
+Docker 主机：ChatAnalyzer API + SQLite ← Nginx + React
+                                           │
+                                http://主机局域网IP:7456
+```
+
+SnowLuma 独立安装并接入原 QQ 进程；不会随 ChatAnalyzer 镜像分发。ChatAnalyzer 只允许 `get_login_info`、`get_friend_list`、`get_group_list`、`get_friend_msg_history`、`get_group_msg_history`，不调用发送、撤回、已读、登录、注销接口。访问事件不会触发 QQ 消息发送。
+
+SnowLuma 是第三方桥接，客户端兼容性和影响需用户在实际环境核实。历史以接口可读范围为限，分页结束也不代表账号的全部历史；断线较久时补读达到上限会显示缺口提示，可点击继续读取。已读页会去重，带负数的消息锚点原样传递。
+
+## 在目标主机部署
+
+以下为待用户在目标主机执行的步骤；本项目实现期间不运行 Docker 部署测试。
+
+1. 安装 Docker Engine / Docker Desktop 与 Compose。
+2. 在项目根目录创建 `secrets/app-password.txt`，只放访问密码，至少 12 字符，建议随机生成。该目录已忽略，不要加入 Git。Linux 上限制其权限，使宿主机用户和容器 UID 1000 能读取；不要授予其他用户读取权限。
+3. 执行：
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+4. 浏览器访问 `http://主机局域网IP:7456`，输入上述密码。API 不直接发布宿主机端口。
+5. 打开“连接设置”，填写 AI Base URL、Key、两个模型名称、OneBot WebSocket 地址、Access Token 和自身 QQ 号码。
+6. 填写“我的档案”，建立对象档案，选择好友或手动填写 QQ；按需指定共同群号。
+
+### SnowLuma 配置
+
+在 QQ 所在电脑安装 [SnowLuma 发行版](https://github.com/SnowLuma/SnowLuma/releases)，按其 [部署文档](https://snowluma.github.io/zh/docs/guide/deploy)接入已登录 QQ。为对应账号开启 OneBot v11 **正向 WebSocket 服务端**，配置强 Access Token，并允许 Docker 主机访问此端口。
+
+开启自身消息上报 `reportSelfMessage`，否则无法观察你自己通过 PC / 手机发送的消息。事件过滤须放行 `message` 和 `message_sent`、所需私聊与群。应用通过 `get_login_info` 校验自身 QQ，防止接错账号。第一次连接失败时检查 OneBot 端口，而不是 SnowLuma WebUI 的 5099 端口。
+
+QQ 与 Docker 在不同电脑时使用 QQ 电脑的局域网 IP；同一宿主机可使用 `ws://host.docker.internal:端口`。容器内的 `127.0.0.1` 指向容器本身。QQ 主机 IP 改变后需更新设置。
+
+### 数据与密钥
+
+`chat_data` 卷保存 `chat.sqlite`、WAL 文件及 `master.key`。API Key 和 OneBot Token 使用 AES-256-GCM 加密；主密钥位于同一受保护卷中，主要防止数据库单独泄露，不防止整卷泄露。备份时停止 API，再备份整个卷；恢复必须同时恢复数据库与主密钥。聊天原文和记忆本身没有加密，应限制主机与备份访问权限。
+
+访问密码来自 Compose secret，登录会话只存于进程内存，24 小时过期；重启 API 会退出登录。密码变更后重启 API。使用局域网 HTTP 时通信未加密；需要跨不可信网络访问时在前面配置 HTTPS。应用不接收 QQ 密码或登录凭证。
+
+更换自身 QQ 账号需使用独立数据卷，避免不同账号消息混入已有档案。对象 QQ 绑定同样不可直接替换。停用对象分析使用暂停按钮；本版不提供批量删除数据的界面。
+
+### 使用与故障定位
+
+- 先设置连接，再建档。连接尚未就绪时档案保留，连接成功后自动导入。
+- “历史记忆”可查看可读范围及继续读取；“重新检查”重试摘要或归纳失败。失败批次不推进相应进度。
+- 未相关群消息只用于局部上下文，不写入对象摘要或事件；群聊判断依赖模型，仍可能误判。
+- “已采用这条建议”进入冷却，不停止摘要更新；如需完全停止 AI，请暂停对象或会话。
+- 原始消息、摘要、画像和检索记忆会提交到你配置的 AI 服务；选择合适的服务与模型。模型需支持 JSON 格式输出。
+- 每次消息更新最多合并 250ms 内的消息。高频聊天会取消旧请求，但供应商可能对已接收请求计费，取消不保证费用退回。
+- 画像与记忆在静默、数量阈值、明显变化及历史归纳时更新；普通闲聊不新增事件。画像只保留最新版本。
+- 查看状态：`docker compose ps`；查看安全日志：`docker compose logs --tail=100 api`。不要把真实密钥粘贴进日志或反馈。
+
+## 本地开发与验证
+
+Node.js >=22.14（使用内置 `node:sqlite`，Node 22 可能提示实验特性）。
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+开发前也需创建本机 secret 文件。分别运行 `npm run dev:api` 和 `npm run dev:web`，打开 Vite 地址。开发代理将 `/api` 转发到本机 3000。`npm start` 只启动独立 API，前端由 Nginx 或 Vite 提供。
+
+测试隔离真实 QQ 和 AI，覆盖消息规范化、只读动作、认证、秘密落盘、去重、取消过期结果、暂停、建议分级和冷却。真实 QQ/模型兼容性、Docker 构建及其他主机的网络与挂载权限仍需目标环境验证。
+
+## 结构
+
+`shared/schema.ts` 定义跨层契约；`server/store.ts` 管理持久化和加密；`bridge.ts` 管理只读 WebSocket；`ai.ts` 封装模型；`engine.ts` 管理分析任务；`application.ts` 编排导入和生命周期；`http.ts` 提供认证 API；`web/` 为 React 界面。
