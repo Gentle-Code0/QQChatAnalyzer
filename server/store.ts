@@ -28,11 +28,11 @@ export class Store {
       CREATE INDEX IF NOT EXISTS messages_time ON messages(conversation_id,time);`);
   }
 
-  private read<T>(kind: string, id: string, schema: z.ZodType<T>): T | undefined {
+  private read<T, Input>(kind: string, id: string, schema: z.ZodType<T, z.ZodTypeDef, Input>): T | undefined {
     const row = this.database.prepare('SELECT data FROM records WHERE kind=? AND id=?').get(kind, id);
     return row ? schema.parse(JSON.parse(String(row.data))) : undefined;
   }
-  private list<T>(kind: string, schema: z.ZodType<T>): T[] {
+  private list<T, Input>(kind: string, schema: z.ZodType<T, z.ZodTypeDef, Input>): T[] {
     return this.database.prepare('SELECT data FROM records WHERE kind=?').all(kind)
       .map(row => schema.parse(JSON.parse(String(row.data))));
   }
