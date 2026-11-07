@@ -18,10 +18,20 @@ let closing = false;
 async function shutdown(): Promise<void> {
   if (closing) return;
   closing = true;
-  server.close(); server.closeIdleConnections();
-  const deadline = setTimeout(() => { console.error('关闭超时'); process.exit(1); }, 10000);
-  try { await application.stop(); clearTimeout(deadline); }
-  catch { console.error('资源清理失败'); process.exitCode = 1; clearTimeout(deadline); }
+  server.close();
+  server.closeIdleConnections();
+  const deadline = setTimeout(() => {
+    console.error('关闭超时');
+    process.exit(1);
+  }, 10000);
+  try {
+    await application.stop();
+    clearTimeout(deadline);
+  } catch {
+    console.error('资源清理失败');
+    process.exitCode = 1;
+    clearTimeout(deadline);
+  }
 }
 process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());

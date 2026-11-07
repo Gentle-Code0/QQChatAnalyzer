@@ -14,18 +14,35 @@ export class Auth {
     for (const [key, expires] of this.sessions) if (expires < now) this.sessions.delete(key);
     const address = request.ip ?? 'unknown';
     const attempt = this.attempts.get(address) ?? { count: 0, expires: now + 60000 };
-    if (attempt.count >= 10 || this.attempts.size > 10000) { response.status(429).json({ error: '尝试过多，请稍后重试' }); return; }
+    if (attempt.count >= 10 || this.attempts.size > 10000) {
+      response.status(429).json({ error: '尝试过多，请稍后重试' });
+      return;
+    }
     attempt.count++;
     this.attempts.set(address, attempt);
     const supplied: unknown = request.body?.password;
     const expectedHash = createHash('sha256').update(this.password).digest();
-    const actualHash = createHash('sha256').update(typeof supplied === 'string' ? supplied : '').digest();
-    if (!timingSafeEqual(expectedHash, actualHash)) { response.status(401).json({ error: '访问密码错误' }); return; }
-    if (this.sessions.size >= 1000) { response.status(429).json({ error: '会话数量达到上限' }); return; }
+    const actualHash = createHash('sha256')
+      .update(typeof supplied === 'string' ? supplied : '')
+      .digest();
+    if (!timingSafeEqual(expectedHash, actualHash)) {
+      response.status(401).json({ error: '访问密码错误' });
+      return;
+    }
+    if (this.sessions.size >= 1000) {
+      response.status(429).json({ error: '会话数量达到上限' });
+      return;
+    }
     this.attempts.delete(address);
     const token = randomBytes(32).toString('hex');
     this.sessions.set(token, now + 86400000);
-    response.cookie('session', token, { httpOnly: true, sameSite: 'strict', maxAge: 86400000, secure: request.secure, path: '/api' });
+    response.cookie('session', token, {
+      httpOnly: true,
+      sameSite: 'strict',
+      maxAge: 86400000,
+      secure: request.secure,
+      path: '/api',
+    });
     response.json({ ok: true });
   }
   private token(request: Request): string {
@@ -35,7 +52,8 @@ export class Auth {
     const token = this.token(request);
     if ((this.sessions.get(token) ?? 0) <= Date.now()) {
       this.sessions.delete(token);
-      response.status(401).json({ error: '请先登录' }); return;
+      response.status(401).json({ error: '请先登录' });
+      return;
     }
     next();
   };
@@ -49,10 +67,12 @@ export class Auth {
 export function sameOrigin(request: Request, response: Response, next: NextFunction): void {
   const origin = request.headers.origin;
   if (origin && origin !== `${request.protocol}://${request.get('host')}`) {
-    response.status(403).json({ error: '拒绝跨来源请求' }); return;
+    response.status(403).json({ error: '拒绝跨来源请求' });
+    return;
   }
   if (request.headers['sec-fetch-site'] === 'cross-site') {
-    response.status(403).json({ error: '拒绝跨站请求' }); return;
+    response.status(403).json({ error: '拒绝跨站请求' });
+    return;
   }
   next();
 }
