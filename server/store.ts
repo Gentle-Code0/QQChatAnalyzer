@@ -73,6 +73,10 @@ export class Store {
       : this.database.prepare('SELECT sequence,data FROM messages WHERE conversation_id=? AND sequence>? ORDER BY sequence DESC LIMIT ?').all(conversationId, afterSequence, limit).reverse();
     return rows.map(row => messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }));
   }
+  pendingMessages(conversationId: string, afterSequence: number): Message[] {
+    return this.database.prepare('SELECT sequence,data FROM messages WHERE conversation_id=? AND sequence>? ORDER BY sequence LIMIT 60')
+      .all(conversationId, afterSequence).map(row => messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }));
+  }
   setSecret(name: 'apiKey' | 'qqToken', plainText: string): void {
     const initializationVector = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, initializationVector);
