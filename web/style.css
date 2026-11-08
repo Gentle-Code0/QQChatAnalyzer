@@ -952,3 +952,138 @@ select:focus {
     grid-column: auto;
   }
 }
+
+.activity-panel {
+  margin-bottom: 22px;
+  padding: 0;
+  overflow: hidden;
+}
+.activity-panel > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 22px;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+.activity-panel > summary::before {
+  content: '▸';
+  color: #8baed1;
+}
+.activity-panel[open] > summary::before {
+  content: '▾';
+}
+.activity-title {
+  font-weight: 700;
+}
+.activity-current {
+  flex: 1;
+  min-width: 120px;
+  color: #7890aa;
+  font-size: 13px;
+}
+.activity-expand,
+.activity-total {
+  font-size: 12px;
+  color: #8b9fb6;
+}
+.activity-panel[open] > summary .activity-expand {
+  display: none;
+}
+.activity-content {
+  border-top: 1px solid #edf2f9;
+  padding: 0 22px 18px;
+}
+.activity-run {
+  border-top: 1px solid #edf2f9;
+  padding: 10px 0;
+}
+.activity-run > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #8297b1;
+}
+.activity-run > summary > * {
+  margin-right: 12px;
+}
+.activity-run-detail {
+  font-size: 12px;
+  color: #8297b1;
+  overflow-wrap: anywhere;
+}
+.activity-steps {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.activity-step {
+  display: flex;
+  gap: 12px;
+  padding: 9px 0;
+}
+.activity-dot {
+  flex: 0 0 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #b9c9da;
+}
+.activity-step-body {
+  flex: 1;
+  min-width: 0;
+}
+.activity-step-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.activity-step-heading strong {
+  font-weight: 500;
+}
+.activity-step-heading time {
+  margin-left: auto;
+  color: #94a6bc;
+}
+.activity-kind,
+.activity-badge {
+  background: #edf4fc;
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 11px;
+}
+.activity-step p {
+  margin: 5px 0 0;
+  color: #879bb3;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.activity-state {
+  color: #91a3b9;
+}
+.activity-running .activity-dot {
+  background: #86acd7;
+  box-shadow: 0 0 0 4px #eaf2fc;
+}
+.activity-completed .activity-dot {
+  background: #8bb6a9;
+}
+.activity-failed .activity-dot {
+  background: #d99eae;
+}
+.activity-badge.activity-failed {
+  background: #faedf2;
+  color: #bd8395;
+}
+.activity-badge.activity-completed {
+  background: #edf7f3;
+  color: #7da393;
+}
+.activity-badge.activity-cancelled,
+.activity-badge.activity-skipped {
+  background: #f0f2f6;
+  color: #96a2b4;
+}

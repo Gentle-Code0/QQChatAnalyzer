@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { z } from 'zod';
 import { Application } from '../server/application.js';
 import { createApi } from '../server/http.js';
 import { fixture } from './helpers.js';
-import { contactSchema } from '../shared/schema.js';
+import { analysisRunSchema, contactSchema } from '../shared/schema.js';
 
 test(
   'API 要求认证、拒绝跨来源写入，状态不暴露密钥；档案绑定不可换号，性别与初始画像可保存',
@@ -53,6 +54,17 @@ test(
       assert.equal(state.status, 200);
       assert.equal(body.includes('invalid-api-test-key'), false);
       assert.match(body, /"hasApiKey":true/);
+      application.engine.notify(data.conversation.id);
+      const detail = await fetch(`${base}/api/conversations/${data.conversation.id}`, {
+        headers: { Cookie: cookie },
+      });
+      const activity = z
+        .object({ activity: z.array(analysisRunSchema) })
+        .parse(await detail.json()).activity;
+      assert.equal(activity.at(-1)?.status, 'waiting');
+      assert.equal(activity.at(-1)?.steps[0]?.label, '等待消息合并');
+      assert.equal((await fetch(`${base}/api/conversations/${data.conversation.id}`)).status, 401);
+
       const settings = {
         ...data.store.settings,
         mergeWindowSeconds: 4.5,

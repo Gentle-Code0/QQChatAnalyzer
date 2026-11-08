@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { beginProgress, type ProgressReporter } from './progress.js';
 import { messageSchema, type ImageSegment, type MessageSegment } from '../shared/schema.js';
 
 export class ImageContextError extends Error {}
@@ -40,6 +41,7 @@ export async function buildContextContent(
   context: unknown,
   resolveImage: ImageResolver,
   signal: AbortSignal,
+  report?: ProgressReporter,
 ): Promise<string | ContentPart[]> {
   signal.throwIfAborted();
   const { recentContext, messages, ...metadata } = contextSchema.parse(context);
@@ -83,7 +85,14 @@ export async function buildContextContent(
       let url = resolved.get(key);
       if (!url) {
         try {
+          const complete = beginProgress(
+            report,
+            'tool',
+            part.file ? 'get_image · 读取图片地址' : '读取消息图片地址',
+          );
           url = imageUrl(await resolveImage(part, signal));
+          signal.throwIfAborted();
+          complete('图片地址已校验，保持原消息中的位置');
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof ImageContextError) throw error;

@@ -4,10 +4,12 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { z } from 'zod';
 import { CompatibleAi, prompts } from '../server/ai.js';
+import type { ProgressEvent } from '../server/progress.js';
 import { settingsSchema, messageSchema } from '../shared/schema.js';
 
 test('各阶段均向同一模型发送有序的多图片上下文', async () => {
   const requests: unknown[] = [];
+  const progress: ProgressEvent[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -49,6 +51,7 @@ test('各阶段均向同一模型发送有序的多图片上下文', async () =>
         },
         z.object({ ok: z.boolean() }),
         new AbortController().signal,
+        (event) => progress.push(event),
       );
       assert.equal(result.ok, true);
     }
@@ -75,6 +78,20 @@ test('各阶段均向同一模型发送有序的多图片上下文', async () =>
       /HTTP\(S\)/,
     );
     assert.equal(requests.length, 4);
+    for (const label of [
+      '校验 AI 配置',
+      '组织图文上下文',
+      '读取消息图片地址',
+      '调用模型 · 等待服务响应',
+      '读取 AI 回传',
+      '解析兼容协议回传',
+      '校验模型输出字段',
+    ]) {
+      assert.ok(progress.some((event) => event.label === label && event.status === 'running'));
+      assert.ok(progress.some((event) => event.label === label && event.status === 'completed'));
+    }
+    assert.equal(JSON.stringify(progress).includes('example.invalid'), false);
+    assert.equal(JSON.stringify(progress).includes('invalid-test-key'), false);
     for (const request of requests) {
       const parsed = z
         .object({

@@ -125,7 +125,7 @@ export function createApi(application: Application, password: string) {
           item.kind === 'group' &&
           !input.groupIds.includes(item.peerId),
       )) {
-      application.engine.cancel(conversation.id);
+      application.engine.cancel(conversation.id, '共同群监视已移除');
       store.saveConversation({ ...conversation, paused: true, status: '群监视已移除' });
     }
     response.json({ ok: true });
@@ -149,7 +149,7 @@ export function createApi(application: Application, password: string) {
     for (const conversation of store
       .conversations()
       .filter((item) => item.contactId === contact.id)) {
-      if (paused) application.engine.cancel(conversation.id);
+      if (paused) application.engine.cancel(conversation.id, '对象 AI 已暂停');
       else application.engine.notify(conversation.id);
       store.saveConversation({
         ...store.conversation(conversation.id)!,
@@ -166,6 +166,7 @@ export function createApi(application: Application, password: string) {
       return;
     }
     response.json({
+      activity: application.engine.activity(conversation.id),
       messages: store.messages(conversation.id),
       memories: store.memories(conversation.contactId),
       observations: store.observations(conversation.id),
@@ -185,7 +186,7 @@ export function createApi(application: Application, password: string) {
       status: paused ? '会话 AI 已暂停' : '等待分析',
       error: '',
     });
-    if (paused) application.engine.cancel(conversation.id);
+    if (paused) application.engine.cancel(conversation.id, '会话 AI 已暂停');
     else application.engine.notify(conversation.id);
     response.json({ ok: true });
   });
@@ -211,7 +212,7 @@ export function createApi(application: Application, password: string) {
       return;
     }
     // Cancelling a running advice job prevents an older response from bypassing the newly set cooldown.
-    application.engine.cancel(conversation.id);
+    application.engine.cancel(conversation.id, '已采用建议，重新安排冷却期间分析');
     store.saveDecision({ ...decision, adopted: true });
     store.saveConversation({
       ...conversation,

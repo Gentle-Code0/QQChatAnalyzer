@@ -166,7 +166,37 @@ export interface Snapshot {
   hasQqToken: boolean;
   bridge: { connected: boolean; status: string };
 }
+export const activityStatusSchema = z.enum([
+  'waiting',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'skipped',
+]);
+export const activityStepSchema = z.object({
+  id: z.string(),
+  kind: z.enum(['ai', 'tool', 'storage', 'schedule']),
+  label: z.string(),
+  status: activityStatusSchema,
+  detail: z.string(),
+  startedAt: z.number(),
+  finishedAt: z.number().optional(),
+});
+export const analysisRunSchema = z.object({
+  id: z.string(),
+  trigger: z.string(),
+  status: activityStatusSchema,
+  detail: z.string(),
+  startedAt: z.number(),
+  finishedAt: z.number().optional(),
+  steps: z.array(activityStepSchema),
+});
+export type ActivityStep = z.infer<typeof activityStepSchema>;
+export type AnalysisRun = z.infer<typeof analysisRunSchema>;
+
 export interface ConversationDetail {
+  activity: AnalysisRun[];
   messages: Message[];
   memories: Memory[];
   observations: Observation[];

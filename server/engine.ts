@@ -11,12 +11,21 @@ import {
   consolidationSchema,
   type AiClient,
 } from './ai.js';
-import type { Contact, Conversation, Message, Memory } from '../shared/schema.js';
+import type { ProgressEvent } from './progress.js';
+import type {
+  AnalysisRun,
+  ActivityStep,
+  Contact,
+  Conversation,
+  Message,
+  Memory,
+} from '../shared/schema.js';
 
 type AnalysisStage = '摘要更新' | '建议必要性判断' | '详细建议生成' | '画像与记忆归纳';
 class AnalysisFailure extends Error {}
 
 interface ConversationWork {
+  run?: AnalysisRun;
   controller?: AbortController;
   debounce?: ReturnType<typeof setTimeout>;
   idle?: ReturnType<typeof setTimeout>;
@@ -41,12 +50,108 @@ export class AnalysisEngine {
   private readonly work = new Map<string, ConversationWork>();
   private readonly tasks = new Set<Promise<void>>();
   private stopped = false;
+  private readonly runs = new Map<string, AnalysisRun[]>();
   constructor(
     private readonly store: Store,
     private readonly ai: AiClient,
     private readonly changed: () => void,
   ) {}
 
+  activity(id: string): AnalysisRun[] {
+    return (this.runs.get(id) ?? []).map((run) => ({
+      ...run,
+      steps: run.steps.map((step) => ({ ...step })),
+    }));
+  }
+  private createRun(id: string, trigger: string): AnalysisRun {
+    const run: AnalysisRun = {
+      id: randomUUID(),
+      trigger,
+      status: 'waiting',
+      detail: '',
+      startedAt: Date.now(),
+      steps: [],
+    };
+    this.runs.set(id, [...(this.runs.get(id) ?? []), run].slice(-5));
+    return run;
+  }
+  private appendStep(run: AnalysisRun, step: ActivityStep): void {
+    run.steps.push(step);
+    if (run.steps.length > 80) {
+      const removable = run.steps.findIndex((item) => item.status !== 'running');
+      if (removable >= 0) run.steps.splice(removable, 1);
+    }
+    this.changed();
+  }
+  private beginStep(
+    id: string,
+    kind: ActivityStep['kind'],
+    label: string,
+  ): (detail?: string) => void {
+    const run = this.work.get(id)?.run;
+    if (!run || !['waiting', 'running'].includes(run.status)) return () => {};
+    const step: ActivityStep = {
+      id: randomUUID(),
+      kind,
+      label,
+      status: 'running',
+      detail: '',
+      startedAt: Date.now(),
+    };
+    this.appendStep(run, step);
+    return (detail = '') => {
+      if (step.status !== 'running' || !['waiting', 'running'].includes(run.status)) return;
+      step.status = 'completed';
+      step.detail = detail;
+      step.finishedAt = Date.now();
+      this.changed();
+    };
+  }
+  private skip(id: string, label: string, detail: string): void {
+    const run = this.work.get(id)?.run;
+    if (run?.status === 'running')
+      this.appendStep(run, {
+        id: randomUUID(),
+        kind: 'schedule',
+        label,
+        status: 'skipped',
+        detail,
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+      });
+  }
+  private finishRun(
+    run: AnalysisRun | undefined,
+    status: 'completed' | 'cancelled' | 'failed',
+    detail: string,
+  ): void {
+    if (!run || !['waiting', 'running'].includes(run.status)) return;
+    run.status = status;
+    run.detail = detail;
+    run.finishedAt = Date.now();
+    for (const step of run.steps) {
+      if (step.status === 'running') {
+        step.status = status;
+        step.finishedAt = run.finishedAt;
+        if (status !== 'completed') step.detail = detail;
+      }
+    }
+    this.changed();
+  }
+  private reportProgress(run: AnalysisRun, event: ProgressEvent): void {
+    const existing = run.steps.find((step) => step.id === event.id);
+    if (existing) {
+      existing.status = event.status;
+      existing.detail = event.detail;
+      if (event.status === 'completed') existing.finishedAt = Date.now();
+      this.changed();
+    } else
+      this.appendStep(run, {
+        ...event,
+        startedAt: Date.now(),
+        ...(event.status === 'completed' ? { finishedAt: Date.now() } : {}),
+      });
+  }
   private active(id: string): { conversation: Conversation; contact: Contact } | undefined {
     if (this.stopped) return;
     const conversation = this.store.conversation(id);
@@ -72,10 +177,11 @@ export class AnalysisEngine {
     }));
   }
   notify(id: string, live = true): void {
-    this.cancel(id);
+    this.cancel(id, live ? '收到新消息，旧任务已取消' : '历史或配置更新，重新安排分析');
     if (!this.active(id)) return;
-    const work: ConversationWork = {};
+    const work: ConversationWork = { run: this.createRun(id, live ? '消息更新' : '历史归纳') };
     this.work.set(id, work);
+    this.beginStep(id, 'schedule', '等待消息合并');
     work.debounce = setTimeout(
       () => this.launch(id, live ? '消息更新' : '历史归纳'),
       this.store.settings.mergeWindowSeconds * 1000,
@@ -87,12 +193,13 @@ export class AnalysisEngine {
       );
   }
   flush(id: string): void {
-    this.cancel(id);
+    this.cancel(id, '用户发起重新检查');
     if (this.active(id)) this.launch(id, '手动检查');
   }
-  cancel(id: string): void {
+  cancel(id: string, reason = '任务已取消（暂停或调度更新）'): void {
     const work = this.work.get(id);
     work?.controller?.abort();
+    this.finishRun(work?.run, 'cancelled', reason);
     clearTimeout(work?.debounce);
     clearTimeout(work?.idle);
     this.work.delete(id);
@@ -100,11 +207,27 @@ export class AnalysisEngine {
   private launch(id: string, trigger: string): void {
     const work = this.work.get(id) ?? {};
     work.controller?.abort();
+    if (work.run?.status === 'running')
+      this.finishRun(work.run, 'cancelled', '新检查触发，旧任务已取消');
+    if (!work.run || work.run.status !== 'waiting') work.run = this.createRun(id, trigger);
+    const run = work.run;
+    for (const step of run.steps) {
+      if (step.status === 'running') {
+        step.status = 'completed';
+        step.finishedAt = Date.now();
+      }
+    }
+    run.status = 'running';
+    run.trigger = trigger;
     clearTimeout(work.debounce);
     const controller = new AbortController();
     work.controller = controller;
     this.work.set(id, work);
+    this.changed();
     const task = this.run(id, trigger, controller)
+      .then(() => {
+        if (this.valid(id, controller)) this.finishRun(run, 'completed', '本轮执行完成');
+      })
       .catch((error: unknown) => {
         if (controller.signal.aborted || !this.active(id)) return;
         const conversation = this.store.conversation(id)!;
@@ -116,6 +239,7 @@ export class AnalysisEngine {
               ? error.message
               : '分析失败（步骤：处理或保存结果）。本阶段未完成，请点击重新检查；若持续失败，请检查本地服务状态。',
         });
+        this.finishRun(run, 'failed', this.store.conversation(id)!.error);
         this.changed();
       })
       .finally(() => {
@@ -131,14 +255,27 @@ export class AnalysisEngine {
     );
   }
   private async callAi<T>(
+    id: string,
     stage: AnalysisStage,
     instruction: string,
     context: unknown,
     schema: z.ZodType<T>,
-    signal: AbortSignal,
+    controller: AbortController,
   ): Promise<T> {
+    const run = this.work.get(id)?.run;
+    const complete = this.beginStep(id, 'ai', stage);
     try {
-      return await this.ai.call(instruction, context, schema, signal);
+      const result = await this.ai.call(
+        instruction,
+        context,
+        schema,
+        controller.signal,
+        (event) => {
+          if (run && this.valid(id, controller)) this.reportProgress(run, event);
+        },
+      );
+      complete();
+      return result;
     } catch (error) {
       if (error instanceof AiCallError)
         throw new AnalysisFailure(`${stage}失败（步骤：${error.step}）：${error.message}`);
@@ -164,7 +301,9 @@ export class AnalysisEngine {
     let relevant = this.store.observations(id).at(-1)?.relevant ?? false;
     while (this.valid(id, controller)) {
       const current = this.active(id)!;
+      const messagesRead = this.beginStep(id, 'tool', '读取待处理消息');
       const pending = this.store.pendingMessages(id, current.conversation.processedSequence);
+      messagesRead(`本批 ${pending.length} 条消息`);
       if (pending.length === 0) break;
       this.store.saveConversation({ ...current.conversation, status: '摘要分析中', error: '' });
       this.changed();
@@ -185,15 +324,17 @@ export class AnalysisEngine {
         previousSignals: this.store.observations(id).slice(-5),
       };
       const result = await this.callAi(
+        id,
         '摘要更新',
         prompts.summary,
         context,
         summaryResultSchema,
-        controller.signal,
+        controller,
       );
       if (!this.valid(id, controller)) return;
       relevant = current.conversation.kind === 'private' || result.relevant;
       significant ||= result.significant && relevant;
+      const observationSaved = this.beginStep(id, 'storage', '保存态度与情绪分析');
       this.store.saveObservation({
         id: randomUUID(),
         conversationId: id,
@@ -202,9 +343,11 @@ export class AnalysisEngine {
         relevant,
         sourceIds: pending.map((message) => message.id),
       });
+      observationSaved();
       // Historical extraction is checkpointed only after the full batch has been consolidated.
       if (historical && relevant) await this.consolidate(id, pending, controller);
       if (!this.valid(id, controller)) return;
+      const summarySaved = this.beginStep(id, 'storage', '保存当前摘要');
       const latest = this.store.conversation(id)!;
       this.store.saveConversation({
         ...latest,
@@ -216,6 +359,7 @@ export class AnalysisEngine {
         error: '',
       });
       this.changed();
+      summarySaved();
       if (historical) trigger = '历史归纳';
     }
     if (!this.valid(id, controller)) return;
@@ -234,7 +378,16 @@ export class AnalysisEngine {
     const liveCount = recent.filter((message) => message.source === 'live').length;
     const threshold = liveCount >= this.store.settings.messageThreshold;
     const due = trigger === '对话静默' || trigger === '手动检查' || threshold || significant;
-    if (!due || trigger === '历史归纳') return;
+    if (!due || trigger === '历史归纳') {
+      this.skip(
+        id,
+        '建议判断',
+        trigger === '历史归纳'
+          ? '历史消息仅更新摘要与记忆，不生成建议'
+          : '尚未达到建议判断的触发条件',
+      );
+      return;
+    }
     if (recent.length === 0) {
       await this.consolidatePending(id, controller);
       return;
@@ -242,6 +395,7 @@ export class AnalysisEngine {
     if (threshold) trigger = '消息数量阈值';
     if (significant) trigger = '明显态度/情绪变化';
     if (!relevant) {
+      this.skip(id, '建议生成', '当前群聊未发现与用户有关的内容');
       this.recordDecision(
         id,
         false,
@@ -257,6 +411,7 @@ export class AnalysisEngine {
       return;
     }
     if (conversation.adoptedUntil > Date.now()) {
+      this.skip(id, '建议生成', '已采用建议，当前处于冷却期');
       this.recordDecision(id, false, '已采用上一条建议，冷却期间暂不重复提醒。', '', trigger, []);
     } else {
       const context = {
@@ -268,26 +423,32 @@ export class AnalysisEngine {
         signals: this.store.observations(id).slice(-20),
       };
       const gate = await this.callAi(
+        id,
         '建议必要性判断',
         prompts.gate,
         context,
         gateResultSchema,
-        controller.signal,
+        controller,
       );
       if (!this.valid(id, controller)) return;
-      if (!gate.needed) this.recordDecision(id, false, gate.reason, '', trigger, []);
-      else {
+      if (!gate.needed) {
+        this.skip(id, '详细建议生成', '模型判断当前无需建议，原因已保存到判断记录');
+        this.recordDecision(id, false, gate.reason, '', trigger, []);
+      } else {
+        const retrievalDone = this.beginStep(id, 'tool', '检索历史记忆');
         const memories = retrieveMemories(
           this.store.memories(contact.id),
           gate.keywords,
           Date.now(),
         );
+        retrievalDone(`匹配 ${memories.length} 条历史记忆（含时间衰减排序）`);
         const result = await this.callAi(
+          id,
           '详细建议生成',
           prompts.advice,
           { ...context, memories, gate },
           adviceResultSchema,
-          controller.signal,
+          controller,
         );
         if (!this.valid(id, controller)) return;
         this.recordDecision(
@@ -339,6 +500,7 @@ export class AnalysisEngine {
     memoryIds: string[],
   ): void {
     const conversation = this.store.conversation(id)!;
+    const decisionSaved = this.beginStep(id, 'storage', '保存建议判断');
     this.store.saveDecision({
       id: randomUUID(),
       conversationId: id,
@@ -356,6 +518,7 @@ export class AnalysisEngine {
       status: '观察中',
       error: '',
     });
+    decisionSaved();
     this.changed();
   }
   private async consolidate(
@@ -365,6 +528,7 @@ export class AnalysisEngine {
   ): Promise<void> {
     const { contact, conversation } = this.active(id)!;
     const result = await this.callAi(
+      id,
       '画像与记忆归纳',
       prompts.consolidate,
       {
@@ -378,9 +542,10 @@ export class AnalysisEngine {
         existingMemories: this.store.memories(contact.id).slice(-60),
       },
       consolidationSchema,
-      controller.signal,
+      controller,
     );
     if (!this.valid(id, controller)) return;
+    const evidenceDone = this.beginStep(id, 'tool', '校验对象身份与消息证据');
     const available = new Map(messages.map((message) => [message.id, message]));
     const hasContactEvidence = (sourceIds: string[]) =>
       sourceIds.every((sourceId) => available.has(sourceId)) &&
@@ -412,6 +577,8 @@ export class AnalysisEngine {
         );
       }
     }
+    evidenceDone('画像和事件的对象归属与来源已校验');
+    const saved = this.beginStep(id, 'storage', '保存画像与事件记忆');
     const latestContact = this.store.contact(contact.id)!;
     // User edits made during a request take precedence over its inferred trait snapshot.
     if (latestContact.traitsRevision === contact.traitsRevision) {
@@ -435,11 +602,12 @@ export class AnalysisEngine {
         createdAt: Date.now(),
       });
     }
+    saved(`本批 ${result.memories.length} 条事件记忆，用户修订的画像优先保留`);
     this.changed();
   }
   async stop(): Promise<void> {
     this.stopped = true;
-    for (const id of this.work.keys()) this.cancel(id);
+    for (const id of this.work.keys()) this.cancel(id, '应用关闭，任务已取消');
     await Promise.allSettled(this.tasks);
   }
 }

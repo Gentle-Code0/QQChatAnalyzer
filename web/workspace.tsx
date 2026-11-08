@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Contact, Conversation, ConversationDetail, Snapshot } from '../shared/schema';
 import { formatTime } from './api';
+import { ActivityPanel } from './activity';
 
 export function Workspace({
   state,
@@ -94,6 +95,13 @@ export function Workspace({
         <div className="notice error" role="alert">
           {conversation.error}
         </div>
+      )}
+      {conversation && (
+        <ActivityPanel
+          key={conversation.id}
+          runs={detail?.activity ?? []}
+          paused={contact.paused || conversation.paused}
+        />
       )}
       <div className="workspace-grid">
         <div className="main-column">

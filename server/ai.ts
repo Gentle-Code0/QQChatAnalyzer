@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Settings, AiTestStep } from '../shared/schema.js';
+import { beginProgress, type ProgressReporter } from './progress.js';
 import { validateEndpoint } from './bridge.js';
 import { buildContextContent, ImageContextError, type ImageResolver } from './ai-context.js';
 
@@ -76,6 +77,7 @@ export interface AiClient {
     context: unknown,
     schema: z.ZodType<T>,
     signal: AbortSignal,
+    report?: ProgressReporter,
   ): Promise<T>;
 }
 
@@ -93,7 +95,9 @@ export class CompatibleAi implements AiClient {
     context: unknown,
     schema: z.ZodType<T>,
     signal: AbortSignal,
+    report?: ProgressReporter,
   ): Promise<T> {
+    const configurationDone = beginProgress(report, 'ai', '校验 AI 配置');
     const { settings, apiKey } = this.getConfiguration();
     if (!apiKey.trim())
       throw new AiCallError('配置校验', '请先填写 API Key，或保存一个可用的 API Key。');
@@ -109,9 +113,12 @@ export class CompatibleAi implements AiClient {
     endpoint.pathname =
       endpoint.pathname.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') +
       '/chat/completions';
+    configurationDone();
+    const contextDone = beginProgress(report, 'ai', '组织图文上下文');
     const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(45000)]);
-    const content = await buildContextContent(context, this.resolveImage, requestSignal);
+    const content = await buildContextContent(context, this.resolveImage, requestSignal, report);
     requestSignal.throwIfAborted();
+    contextDone();
     const body = JSON.stringify({
       model: settings.model,
       temperature: 0.2,
@@ -126,6 +133,7 @@ export class CompatibleAi implements AiClient {
       ],
     });
     if (Buffer.byteLength(body) > 8 * 1024 * 1024) throw new Error('AI 请求超过大小限制');
+    const responseDone = beginProgress(report, 'ai', '调用模型 · 等待服务响应');
     let response: Response;
     try {
       response = await fetch(endpoint, {
@@ -153,6 +161,8 @@ export class CompatibleAi implements AiClient {
         throw new AiCallError('HTTP 响应', `AI 服务返回 HTTP ${response.status}${hint}。`);
       }
     }
+    responseDone(`HTTP ${response.status}`);
+    const readDone = beginProgress(report, 'ai', '读取 AI 回传');
     const chunks: Uint8Array[] = [];
     let size = 0;
     try {
@@ -179,6 +189,8 @@ export class CompatibleAi implements AiClient {
       throw requestFailure('读取回传', requestSignal);
     }
     if (!size) throw new AiCallError('读取回传', 'AI 服务返回了空响应。');
+    readDone(`已接收 ${size} 字节`);
+    const parseDone = beginProgress(report, 'ai', '解析兼容协议回传');
     let responseContent: string;
     try {
       const envelope = z
@@ -193,6 +205,8 @@ export class CompatibleAi implements AiClient {
         '服务回传不是有效的兼容协议 JSON，或缺少 choices[0].message.content。',
       );
     }
+    parseDone();
+    const validateDone = beginProgress(report, 'ai', '校验模型输出字段');
     let output: unknown;
     try {
       output = JSON.parse(responseContent);
@@ -228,6 +242,7 @@ export class CompatibleAi implements AiClient {
         `模型输出字段缺失或不符合要求：${fields.join('、')}。本阶段结果未保存，请重新检查。`,
       );
     }
+    validateDone();
     return result.data;
   }
 }
