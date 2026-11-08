@@ -53,7 +53,10 @@ export class AnalysisEngine {
     if (!this.active(id)) return;
     const work: ConversationWork = {};
     this.work.set(id, work);
-    work.debounce = setTimeout(() => this.launch(id, live ? '消息更新' : '历史归纳'), 250);
+    work.debounce = setTimeout(
+      () => this.launch(id, live ? '消息更新' : '历史归纳'),
+      this.store.settings.mergeWindowSeconds * 1000,
+    );
     if (live)
       work.idle = setTimeout(
         () => this.launch(id, '对话静默'),

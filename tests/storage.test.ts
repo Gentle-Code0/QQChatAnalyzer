@@ -6,6 +6,14 @@ import { fixture } from './helpers.js';
 import { Store } from '../server/store.js';
 import { retrieveMemories } from '../server/engine.js';
 import type { Memory } from '../shared/schema.js';
+import { settingsSchema } from '../shared/schema.js';
+
+test('新设置默认合并 3 秒、冷却 1 分钟，已有显式冷却配置保留', () => {
+  const defaults = settingsSchema.parse({});
+  assert.equal(defaults.mergeWindowSeconds, 3);
+  assert.equal(defaults.cooldownMinutes, 1);
+  assert.equal(settingsSchema.parse({ cooldownMinutes: 10 }).cooldownMinutes, 10);
+});
 
 test('密钥加密落盘，重新打开后可解密；消息按会话去重', () => {
   const data = fixture();

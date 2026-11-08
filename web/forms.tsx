@@ -341,8 +341,27 @@ export function SettingsForm({
           />
         </Field>
         <h3>分析节奏</h3>
+        <p className="muted small">
+          合并窗口用于延后轻量摘要与情绪分析；累计条数和静默时间用于触发“是否需要建议”的轻量判断。
+        </p>
         <div className="two-col">
-          <Field label="消息触发阈值（条）">
+          <Field
+            label="消息合并窗口（秒）"
+            hint="默认 3 秒；新消息会重新开始计时，合并后统一分析。"
+          >
+            <input
+              type="number"
+              required
+              min={0.1}
+              max={60}
+              step={0.1}
+              value={settings.mergeWindowSeconds}
+              onChange={(event) =>
+                setSettings({ ...settings, mergeWindowSeconds: Number(event.target.value) })
+              }
+            />
+          </Field>
+          <Field label="轻量建议判断累计消息数（条）">
             <input
               type="number"
               min={2}
@@ -353,7 +372,10 @@ export function SettingsForm({
               }
             />
           </Field>
-          <Field label="双方静默时长（秒）">
+          <Field
+            label="轻量建议判断静默时间（秒）"
+            hint="双方均未产生新消息时计时；达到该时长可直接触发检查。"
+          >
             <input
               type="number"
               min={5}

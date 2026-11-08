@@ -101,8 +101,9 @@ export const settingsSchema = z.object({
     .regex(/^$|^\d{5,15}$/)
     .default(''),
   messageThreshold: z.number().int().min(2).max(200).default(20),
+  mergeWindowSeconds: z.number().min(0.1).max(60).default(3),
   idleSeconds: z.number().int().min(5).max(600).default(15),
-  cooldownMinutes: z.number().int().min(1).max(1440).default(10),
+  cooldownMinutes: z.number().int().min(1).max(1440).default(1),
   historyPages: z.number().int().min(1).max(200).default(20),
 });
 export type SelfProfile = z.infer<typeof selfProfileSchema>;

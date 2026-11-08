@@ -48,6 +48,82 @@ function watcher(predicate: () => boolean) {
   };
 }
 
+for (const mergeWindowSeconds of [3, 7]) {
+  test(
+    `合并窗口为 ${mergeWindowSeconds} 秒时，后续消息重新计时并统一轻量分析`,
+    { timeout: 5000 },
+    async (context) => {
+      context.mock.timers.enable({ apis: ['setTimeout'] });
+      const data = fixture();
+      data.store.settings = { ...data.store.settings, mergeWindowSeconds };
+      const summarized = watcher(
+        () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+      );
+      let messageCount = 0;
+      const ai = new FakeAi((_instruction, _signal, payload) => {
+        messageCount = z.object({ messages: z.array(z.unknown()) }).parse(payload).messages.length;
+        return light;
+      });
+      const engine = new AnalysisEngine(data.store, ai, summarized.changed);
+      try {
+        data.store.addMessage(data.message('1'));
+        engine.notify(data.conversation.id);
+        context.mock.timers.tick(1000);
+        data.store.addMessage(data.message('2'));
+        engine.notify(data.conversation.id);
+        context.mock.timers.tick(mergeWindowSeconds * 1000 - 1);
+        assert.equal(ai.calls.length, 0);
+        context.mock.timers.tick(1);
+        await summarized.promise;
+        assert.deepEqual(ai.calls, [prompts.light]);
+        assert.equal(messageCount, 2);
+      } finally {
+        await engine.stop();
+        context.mock.timers.reset();
+        data.cleanup();
+      }
+    },
+  );
+}
+
+test('自定义累计阈值达到 3 条时触发轻量建议判断', { timeout: 5000 }, async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const data = fixture();
+  data.store.settings = { ...data.store.settings, messageThreshold: 3 };
+  const summarized = watcher(
+    () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+  );
+  const completed = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
+  const ai = new FakeAi((instruction) =>
+    instruction === prompts.light
+      ? light
+      : instruction === prompts.gate
+        ? { needed: false, reason: '无需建议', keywords: [] }
+        : consolidation,
+  );
+  const engine = new AnalysisEngine(data.store, ai, () => {
+    summarized.changed();
+    completed.changed();
+  });
+  try {
+    data.store.addMessage(data.message('1'));
+    data.store.addMessage(data.message('2'));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(3000);
+    await summarized.promise;
+    assert.equal(data.store.decisions(data.conversation.id).length, 0);
+    data.store.addMessage(data.message('3'));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(3000);
+    await completed.promise;
+    assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '消息数量阈值');
+  } finally {
+    await engine.stop();
+    context.mock.timers.reset();
+    data.cleanup();
+  }
+});
+
 test('需要建议时先通过轻量判断，再检索历史并保存完整建议及来源', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
@@ -183,7 +259,7 @@ test(
     try {
       data.store.addMessage(data.message('1'));
       engine.notify(data.conversation.id);
-      context.mock.timers.tick(250);
+      context.mock.timers.tick(data.store.settings.mergeWindowSeconds * 1000);
       await summarized.promise;
       assert.equal(data.store.decisions(data.conversation.id).length, 0);
       context.mock.timers.tick(data.store.settings.idleSeconds * 1000);
