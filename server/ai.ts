@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { Settings, AiTestStep } from '../shared/schema.js';
 import { beginProgress, type ProgressReporter } from './progress.js';
+import { embedImages, prepareImage, type ImageLoader } from './images.js';
+import { providerErrorHint } from './ai-errors.js';
 import { validateEndpoint } from './bridge.js';
 import { buildContextContent, ImageContextError, type ImageResolver } from './ai-context.js';
 
@@ -89,6 +91,7 @@ export class CompatibleAi implements AiClient {
       if (!image.url) throw new ImageContextError('图片缺少可访问地址，请检查 QQ 连接后重试。');
       return image.url;
     },
+    private readonly loadImage: ImageLoader = prepareImage,
   ) {}
   async call<T>(
     instruction: string,
@@ -116,7 +119,13 @@ export class CompatibleAi implements AiClient {
     configurationDone();
     const contextDone = beginProgress(report, 'ai', '组织图文上下文');
     const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(45000)]);
-    const content = await buildContextContent(context, this.resolveImage, requestSignal, report);
+    const sourceContent = await buildContextContent(
+      context,
+      this.resolveImage,
+      requestSignal,
+      report,
+    );
+    const content = await embedImages(sourceContent, requestSignal, report, this.loadImage);
     requestSignal.throwIfAborted();
     contextDone();
     const body = JSON.stringify({
@@ -132,7 +141,8 @@ export class CompatibleAi implements AiClient {
         { role: 'user', content },
       ],
     });
-    if (Buffer.byteLength(body) > 8 * 1024 * 1024) throw new Error('AI 请求超过大小限制');
+    if (Buffer.byteLength(body) > 24 * 1024 * 1024)
+      throw new AiCallError('发送请求', 'AI 请求超过 24 MiB 大小限制');
     const responseDone = beginProgress(report, 'ai', '调用模型 · 等待服务响应');
     let response: Response;
     try {
@@ -147,19 +157,21 @@ export class CompatibleAi implements AiClient {
       throw requestFailure('发送请求', requestSignal);
     }
     if (!response.ok) {
-      try {
-        await response.body?.cancel();
-      } finally {
-        const hint =
-          response.status === 401 || response.status === 403
-            ? '，请检查 API Key 和调用权限'
-            : response.status === 404
-              ? '，请检查 Base URL 和模型名称'
-              : response.status === 429
-                ? '，请检查额度或请求频率'
-                : '，请检查服务状态';
-        throw new AiCallError('HTTP 响应', `AI 服务返回 HTTP ${response.status}${hint}。`);
-      }
+      const detail = await providerErrorHint(response);
+      const hint =
+        response.status === 401 || response.status === 403
+          ? '请检查 API Key 和调用权限'
+          : response.status === 404
+            ? '请检查 Base URL 和模型名称'
+            : response.status === 429
+              ? '请检查额度或请求频率'
+              : response.status === 400
+                ? '请检查图像输入、上下文长度和模型参数兼容性'
+                : '请检查服务状态';
+      throw new AiCallError(
+        'HTTP 响应',
+        `AI 服务返回 HTTP ${response.status}：${detail}；${hint}。`,
+      );
     }
     responseDone(`HTTP ${response.status}`);
     const readDone = beginProgress(report, 'ai', '读取 AI 回传');
