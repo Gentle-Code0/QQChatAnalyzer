@@ -312,7 +312,7 @@ export function Workspace({
           <section className="quiet-card">
             <div className="eyebrow">A LITTLE SPACE</div>
             <h3>给对话一点呼吸</h3>
-            <p>平时轻量观察，只在有必要时提醒。理解一段关系，需要上下文，也需要耐心。</p>
+            <p>平时持续观察，只在有必要时提醒。理解一段关系，需要上下文，也需要耐心。</p>
             {conversation && conversation.adoptedUntil > Date.now() && (
               <span className="pill">建议冷却至 {formatTime(conversation.adoptedUntil)}</span>
             )}

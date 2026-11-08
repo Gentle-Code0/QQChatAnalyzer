@@ -29,7 +29,6 @@ class FakeAi implements AiClient {
     ) => unknown | Promise<unknown>,
   ) {}
   async call<T>(
-    _tier: 'light' | 'full',
     instruction: string,
     context: unknown,
     schema: z.ZodType<T>,
@@ -51,7 +50,7 @@ function watcher(predicate: () => boolean) {
 
 for (const mergeWindowSeconds of [3, 7]) {
   test(
-    `合并窗口为 ${mergeWindowSeconds} 秒时，后续消息重新计时并统一轻量分析`,
+    `合并窗口为 ${mergeWindowSeconds} 秒时，后续消息重新计时并统一摘要分析`,
     { timeout: 5000 },
     async (context) => {
       context.mock.timers.enable({ apis: ['setTimeout'] });
@@ -76,7 +75,7 @@ for (const mergeWindowSeconds of [3, 7]) {
         assert.equal(ai.calls.length, 0);
         context.mock.timers.tick(1);
         await summarized.promise;
-        assert.deepEqual(ai.calls, [prompts.light]);
+        assert.deepEqual(ai.calls, [prompts.summary]);
         assert.equal(messageCount, 2);
       } finally {
         await engine.stop();
@@ -87,7 +86,7 @@ for (const mergeWindowSeconds of [3, 7]) {
   );
 }
 
-test('自定义累计阈值达到 3 条时触发轻量建议判断', { timeout: 5000 }, async (context) => {
+test('自定义累计阈值达到 3 条时触发建议必要性判断', { timeout: 5000 }, async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const data = fixture();
   data.store.settings = { ...data.store.settings, messageThreshold: 3 };
@@ -96,7 +95,7 @@ test('自定义累计阈值达到 3 条时触发轻量建议判断', { timeout: 
   );
   const completed = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
   const ai = new FakeAi((instruction) =>
-    instruction === prompts.light
+    instruction === prompts.summary
       ? light
       : instruction === prompts.gate
         ? { needed: false, reason: '无需建议', keywords: [] }
@@ -125,7 +124,7 @@ test('自定义累计阈值达到 3 条时触发轻量建议判断', { timeout: 
   }
 });
 
-test('需要建议时先通过轻量判断，再检索历史并保存完整建议及来源', { timeout: 5000 }, async () => {
+test('需要建议时先通过必要性判断，再检索历史并保存完整建议及来源', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
   let retrievedIds: string[] = [];
@@ -140,7 +139,7 @@ test('需要建议时先通过轻量判断，再检索历史并保存完整建�
     keywords: ['见面'],
   });
   const ai = new FakeAi((instruction, _signal, context) => {
-    if (instruction === prompts.light) return light;
+    if (instruction === prompts.summary) return light;
     if (instruction === prompts.gate)
       return { needed: true, reason: '有待确认的约定', keywords: ['见面'] };
     if (instruction === prompts.advice) {
@@ -184,7 +183,7 @@ test('历史归纳保留可核验来源，并不生成建议', { timeout: 5000 }
     keywords: ['见面'],
   };
   const ai = new FakeAi((instruction) =>
-    instruction === prompts.light
+    instruction === prompts.summary
       ? light
       : {
           ...consolidation,
@@ -215,7 +214,7 @@ test('归纳失败后可单独重试，不因判断进度已推进而丢失记�
   const completed = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
   let attempts = 0;
   const ai = new FakeAi((instruction) => {
-    if (instruction === prompts.light) return light;
+    if (instruction === prompts.summary) return light;
     if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
     attempts++;
     if (attempts === 1) throw new Error('测试中的临时网络错误');
@@ -252,7 +251,7 @@ test(
     );
     const completed = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
     const ai = new FakeAi((instruction) =>
-      instruction === prompts.light
+      instruction === prompts.summary
         ? light
         : instruction === prompts.gate
           ? { needed: false, reason: '无需建议', keywords: [] }
@@ -309,11 +308,11 @@ test('会话暂停会中断在途请求，返回后不写入分析结果', { tim
   }
 });
 
-test('无需建议时保存原因，不调用复杂建议；仍允许更新长期画像', { timeout: 5000 }, async () => {
+test('无需建议时保存原因，不生成详细建议；仍允许更新长期画像', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
   const ai = new FakeAi((instruction) =>
-    instruction === prompts.light
+    instruction === prompts.summary
       ? light
       : instruction === prompts.gate
         ? { needed: false, reason: '普通讨论，无需介入', keywords: [] }
@@ -340,7 +339,7 @@ test('新消息中断旧请求，忽略即使供应商取消失败后仍返回�
   let lightCalls = 0;
   const watched = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
   const ai = new FakeAi((instruction, signal) => {
-    if (instruction === prompts.light) {
+    if (instruction === prompts.summary) {
       lightCalls++;
       if (lightCalls === 1) {
         started.resolve(signal);
@@ -394,7 +393,7 @@ test('对象暂停时完全禁止 AI 调用', async () => {
 test('采用建议后的冷却保留摘要更新，跳过重复建议判断', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
-  const ai = new FakeAi((instruction) => (instruction === prompts.light ? light : consolidation));
+  const ai = new FakeAi((instruction) => (instruction === prompts.summary ? light : consolidation));
   const engine = new AnalysisEngine(data.store, ai, watched.changed);
   try {
     data.store.saveConversation({ ...data.conversation, adoptedUntil: Date.now() + 60000 });
@@ -422,7 +421,7 @@ test('群聊无关内容不进入摘要与历史记忆，也不调用完整模�
     await watched.promise;
     assert.equal(data.store.conversation(data.conversation.id)?.summary, '原摘要');
     assert.equal(data.store.memories(data.contact.id).length, 0);
-    assert.deepEqual(ai.calls, [prompts.light]);
+    assert.deepEqual(ai.calls, [prompts.summary]);
   } finally {
     await engine.stop();
     data.cleanup();
@@ -453,7 +452,7 @@ for (const kind of ['private', 'group'] as const) {
         );
         let retry = false;
         const ai = new FakeAi((instruction, _signal, payload) => {
-          if (instruction === prompts.light) return light;
+          if (instruction === prompts.summary) return light;
           if (instruction === prompts.gate)
             return { needed: false, reason: '无需建议', keywords: [] };
           const context = z
@@ -541,7 +540,7 @@ for (const action of ['edit', 'pause', 'new-message'] as const) {
       () => data.store.contact(data.contact.id)?.traits.communication === '用户修订',
     );
     const ai = new FakeAi((instruction, signal) => {
-      if (instruction === prompts.light) return light;
+      if (instruction === prompts.summary) return light;
       if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
       started.resolve(signal);
       return response.promise;

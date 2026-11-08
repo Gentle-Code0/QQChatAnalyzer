@@ -100,3 +100,18 @@ test('旧档案默认未填写性别并保留简介，性别和画像重新打�
     data.cleanup();
   }
 });
+
+test('单模型设置兼容旧配置且优先保留显式模型名称', () => {
+  assert.equal(settingsSchema.parse({}).model, 'gpt-4o');
+  const migrated = settingsSchema.parse({
+    fullModel: 'custom-vision',
+    lightModel: 'custom-small',
+    cooldownMinutes: 10,
+  });
+  assert.equal(migrated.model, 'custom-vision');
+  assert.equal(migrated.cooldownMinutes, 10);
+  assert.equal('lightModel' in migrated, false);
+  assert.equal('fullModel' in migrated, false);
+  assert.equal(settingsSchema.parse({ lightModel: 'only-legacy' }).model, 'only-legacy');
+  assert.equal(settingsSchema.parse({ model: 'chosen', fullModel: 'legacy' }).model, 'chosen');
+});

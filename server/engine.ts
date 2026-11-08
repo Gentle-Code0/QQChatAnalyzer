@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import {
   prompts,
-  lightResultSchema,
+  summaryResultSchema,
   gateResultSchema,
   adviceResultSchema,
   consolidationSchema,
@@ -133,7 +133,7 @@ export class AnalysisEngine {
       const current = this.active(id)!;
       const pending = this.store.pendingMessages(id, current.conversation.processedSequence);
       if (pending.length === 0) break;
-      this.store.saveConversation({ ...current.conversation, status: '轻量分析中', error: '' });
+      this.store.saveConversation({ ...current.conversation, status: '摘要分析中', error: '' });
       this.changed();
       const historical = pending.every((message) => message.source === 'history');
       const context = {
@@ -152,10 +152,9 @@ export class AnalysisEngine {
         previousSignals: this.store.observations(id).slice(-5),
       };
       const result = await this.ai.call(
-        'light',
-        prompts.light,
+        prompts.summary,
         context,
-        lightResultSchema,
+        summaryResultSchema,
         controller.signal,
       );
       if (!this.valid(id, controller)) return;
@@ -234,13 +233,7 @@ export class AnalysisEngine {
         messages: this.attributedMessages(recent, contact),
         signals: this.store.observations(id).slice(-20),
       };
-      const gate = await this.ai.call(
-        'light',
-        prompts.gate,
-        context,
-        gateResultSchema,
-        controller.signal,
-      );
+      const gate = await this.ai.call(prompts.gate, context, gateResultSchema, controller.signal);
       if (!this.valid(id, controller)) return;
       if (!gate.needed) this.recordDecision(id, false, gate.reason, '', trigger, []);
       else {
@@ -250,7 +243,6 @@ export class AnalysisEngine {
           Date.now(),
         );
         const result = await this.ai.call(
-          'full',
           prompts.advice,
           { ...context, memories, gate },
           adviceResultSchema,
@@ -331,7 +323,6 @@ export class AnalysisEngine {
   ): Promise<void> {
     const { contact, conversation } = this.active(id)!;
     const result = await this.ai.call(
-      'full',
       prompts.consolidate,
       {
         self: this.store.self,

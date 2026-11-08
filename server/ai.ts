@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Settings } from '../shared/schema.js';
 import { validateEndpoint } from './bridge.js';
 
-export const lightResultSchema = z.object({
+export const summaryResultSchema = z.object({
   summary: z.string().max(6000),
   relevant: z.boolean(),
   significant: z.boolean(),
@@ -46,7 +46,6 @@ export const consolidationSchema = z.object({
 });
 export interface AiClient {
   call<T>(
-    tier: 'light' | 'full',
     instruction: string,
     context: unknown,
     schema: z.ZodType<T>,
@@ -58,7 +57,6 @@ export interface AiClient {
 export class CompatibleAi implements AiClient {
   constructor(private readonly getConfiguration: () => { settings: Settings; apiKey: string }) {}
   async call<T>(
-    tier: 'light' | 'full',
     instruction: string,
     context: unknown,
     schema: z.ZodType<T>,
@@ -76,9 +74,9 @@ export class CompatibleAi implements AiClient {
       signal: AbortSignal.any([signal, AbortSignal.timeout(45000)]),
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: tier === 'light' ? settings.lightModel : settings.fullModel,
+        model: settings.model,
         temperature: 0.2,
-        max_tokens: tier === 'light' ? 1800 : 4000,
+        max_tokens: 4000,
         response_format: { type: 'json_object' },
         messages: [
           {
@@ -123,7 +121,7 @@ export class CompatibleAi implements AiClient {
 }
 
 export const prompts = {
-  light:
+  summary:
     '增量更新 previousSummary，保留未回答问题、话题和情绪变化，避免丢失已有事实。群聊 relevant 仅当对象谈及用户、回应用户或与用户相关的话题才为 true，参考别名、提及与上下文。无关时 summary 原样返回。输出 {summary,relevant,significant,attitude,emotion,mood,reason}。attitude 是对用户的态度，emotion 是情绪效价，范围均为 -100 到100；缺少证据用0并说明。significant 仅明确突变为true。',
   gate: '综合当前摘要、近期原始消息和态度情绪记录，判断此刻是否有必要提醒用户或提供行动建议。普通寒暄不建议。输出 {needed:boolean,reason:string,keywords:string[]}，不需要时说明原因，需要时提取用于历史事件检索的关键词。',
   advice:

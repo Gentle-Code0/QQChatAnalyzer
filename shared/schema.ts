@@ -93,21 +93,28 @@ export const decisionSchema = z.object({
   trigger: z.string(),
   memoryIds: z.array(z.string()).default([]),
 });
-export const settingsSchema = z.object({
-  baseUrl: z.string().max(500).default('https://api.openai.com/v1'),
-  lightModel: z.string().trim().min(1).max(100).default('gpt-4o-mini'),
-  fullModel: z.string().trim().min(1).max(100).default('gpt-4o'),
-  qqUrl: z.string().max(500).default(''),
-  selfQq: z
-    .string()
-    .regex(/^$|^\d{5,15}$/)
-    .default(''),
-  messageThreshold: z.number().int().min(2).max(200).default(20),
-  mergeWindowSeconds: z.number().min(0.1).max(60).default(3),
-  idleSeconds: z.number().int().min(5).max(600).default(15),
-  cooldownMinutes: z.number().int().min(1).max(1440).default(1),
-  historyPages: z.number().int().min(1).max(200).default(20),
-});
+export const settingsSchema = z
+  .object({
+    baseUrl: z.string().max(500).default('https://api.openai.com/v1'),
+    model: z.string().trim().min(1).max(100).optional(),
+    fullModel: z.string().trim().min(1).max(100).optional(),
+    lightModel: z.string().trim().min(1).max(100).optional(),
+    qqUrl: z.string().max(500).default(''),
+    selfQq: z
+      .string()
+      .regex(/^$|^\d{5,15}$/)
+      .default(''),
+    messageThreshold: z.number().int().min(2).max(200).default(20),
+    mergeWindowSeconds: z.number().min(0.1).max(60).default(3),
+    idleSeconds: z.number().int().min(5).max(600).default(15),
+    cooldownMinutes: z.number().int().min(1).max(1440).default(1),
+    historyPages: z.number().int().min(1).max(200).default(20),
+  })
+  .transform(({ model, fullModel, lightModel, ...settings }) => ({
+    ...settings,
+    // Prefer the previously configured analysis model when opening an existing database.
+    model: model ?? fullModel ?? lightModel ?? 'gpt-4o',
+  }));
 export type SelfProfile = z.infer<typeof selfProfileSchema>;
 export type Contact = z.infer<typeof contactSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;

@@ -337,22 +337,16 @@ export function SettingsForm({
             onChange={(event) => setApiKey(event.target.value)}
           />
         </Field>
-        <div className="two-col">
-          <Field label="轻量判断模型">
-            <input
-              required
-              value={settings.lightModel}
-              onChange={(event) => setSettings({ ...settings, lightModel: event.target.value })}
-            />
-          </Field>
-          <Field label="完整分析 / 归纳模型">
-            <input
-              required
-              value={settings.fullModel}
-              onChange={(event) => setSettings({ ...settings, fullModel: event.target.value })}
-            />
-          </Field>
-        </div>
+        <Field
+          label="模型名称"
+          hint="整个应用使用同一个模型；请选择支持图片输入及 JSON 输出的多模态模型。"
+        >
+          <input
+            required
+            value={settings.model}
+            onChange={(event) => setSettings({ ...settings, model: event.target.value })}
+          />
+        </Field>
         <h3>QQ · SnowLuma OneBot v11</h3>
         <Field
           label="WebSocket 地址"
@@ -381,7 +375,7 @@ export function SettingsForm({
         </Field>
         <h3>分析节奏</h3>
         <p className="muted small">
-          合并窗口用于延后轻量摘要与情绪分析；累计条数和静默时间用于触发“是否需要建议”的轻量判断。
+          合并窗口用于延后摘要与情绪分析；累计条数和静默时间用于触发“是否需要建议”的判断。
         </p>
         <div className="two-col">
           <Field
@@ -400,7 +394,7 @@ export function SettingsForm({
               }
             />
           </Field>
-          <Field label="轻量建议判断累计消息数（条）">
+          <Field label="建议必要性判断累计消息数（条）">
             <input
               type="number"
               min={2}
@@ -412,7 +406,7 @@ export function SettingsForm({
             />
           </Field>
           <Field
-            label="轻量建议判断静默时间（秒）"
+            label="建议必要性判断静默时间（秒）"
             hint="双方均未产生新消息时计时；达到该时长可直接触发检查。"
           >
             <input

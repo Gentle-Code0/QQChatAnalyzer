@@ -35,8 +35,9 @@ export function createApi(application: Application, password: string) {
     response.json({ ok: true });
   });
   app.put('/api/settings', (request, response) => {
-    const input = settingsSchema
-      .extend({ apiKey: z.string().max(4000).optional(), qqToken: z.string().max(4000).optional() })
+    const input = settingsSchema.parse(request.body);
+    const secrets = z
+      .object({ apiKey: z.string().max(4000).optional(), qqToken: z.string().max(4000).optional() })
       .parse(request.body);
     validateEndpoint(input.baseUrl, ['https:', 'http:']);
     if (input.qqUrl) validateEndpoint(input.qqUrl, ['ws:', 'wss:']);
@@ -57,10 +58,10 @@ export function createApi(application: Application, password: string) {
     const reconnect =
       input.qqUrl !== store.settings.qqUrl ||
       input.selfQq !== store.settings.selfQq ||
-      input.qqToken !== undefined;
+      secrets.qqToken !== undefined;
     store.settings = settingsSchema.parse(input);
-    if (input.apiKey !== undefined) store.setSecret('apiKey', input.apiKey);
-    if (input.qqToken !== undefined) store.setSecret('qqToken', input.qqToken);
+    if (secrets.apiKey !== undefined) store.setSecret('apiKey', secrets.apiKey);
+    if (secrets.qqToken !== undefined) store.setSecret('qqToken', secrets.qqToken);
     if (reconnect) application.reconnect();
     for (const conversation of store.conversations())
       application.engine.notify(conversation.id, false);

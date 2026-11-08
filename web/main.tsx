@@ -248,7 +248,7 @@ function App() {
               </div>
               <div>
                 <span>观察方式</span>
-                <strong className="text-stat">只读 · 轻量优先</strong>
+                <strong className="text-stat">只读 · 按需建议</strong>
               </div>
             </section>
             <div className="section-heading">
