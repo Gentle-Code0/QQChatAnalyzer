@@ -16,6 +16,7 @@ const light = {
 };
 const consolidation = {
   traits: { likes: '', boundaries: '', communication: '表达直接' },
+  traitSourceIds: { likes: [], boundaries: [], communication: ['1'] },
   memories: [],
 };
 class FakeAi implements AiClient {
@@ -168,13 +169,14 @@ test('需要建议时先通过轻量判断，再检索历史并保存完整建�
   }
 });
 
-test('历史归纳保留可核验来源，拒绝模型编造的来源，并不生成建议', { timeout: 5000 }, async () => {
+test('历史归纳保留可核验来源，并不生成建议', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(
     () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
   );
   const message = { ...data.message('history-1'), source: 'history' as const };
   const memory = {
+    subjectId: data.contact.qq,
     kind: 'promise',
     text: '周六见面',
     time: 0,
@@ -184,7 +186,11 @@ test('历史归纳保留可核验来源，拒绝模型编造的来源，并不�
   const ai = new FakeAi((instruction) =>
     instruction === prompts.light
       ? light
-      : { ...consolidation, memories: [memory, { ...memory, sourceIds: ['invented'] }] },
+      : {
+          ...consolidation,
+          traitSourceIds: { likes: [], boundaries: [], communication: ['history-1'] },
+          memories: [memory],
+        },
   );
   const engine = new AnalysisEngine(data.store, ai, watched.changed);
   try {
@@ -422,3 +428,159 @@ test('群聊无关内容不进入摘要与历史记忆，也不调用完整模�
     data.cleanup();
   }
 });
+
+for (const kind of ['private', 'group'] as const) {
+  for (const invalid of [
+    'habit-self',
+    'event-self',
+    'event-other',
+    'subject',
+    'invented',
+  ] as const) {
+    test(
+      `${kind} 归纳拒绝错误归属 ${invalid}，保留检查点并允许重试`,
+      { timeout: 5000 },
+      async () => {
+        const data = fixture();
+        data.store.settings = { ...data.store.settings, selfQq: '67890' };
+        data.store.self = { ...data.store.self, name: '相同昵称' };
+        data.store.saveConversation({ ...data.conversation, kind });
+        const failed = watcher(
+          () => data.store.conversation(data.conversation.id)?.status === '分析失败',
+        );
+        const completed = watcher(
+          () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+        );
+        let retry = false;
+        const ai = new FakeAi((instruction, _signal, payload) => {
+          if (instruction === prompts.light) return light;
+          if (instruction === prompts.gate)
+            return { needed: false, reason: '无需建议', keywords: [] };
+          const context = z
+            .object({
+              contact: z.object({ qq: z.string() }),
+              kind: z.string(),
+              participants: z.object({ self: z.object({ qq: z.string() }) }),
+              messages: z.array(z.object({ id: z.string(), senderRole: z.string() })),
+            })
+            .parse(payload);
+          assert.equal(context.contact.qq, data.contact.qq);
+          assert.equal(context.participants.self.qq, '67890');
+          assert.equal(context.kind, kind);
+          assert.deepEqual(
+            context.messages.map((m) => m.senderRole),
+            ['self', 'other', 'contact'],
+          );
+          const sourceId =
+            invalid === 'event-other' ? 'other' : invalid === 'invented' ? 'missing' : 'self';
+          return {
+            traits: { ...data.contact.traits, communication: '表达直接' },
+            traitSourceIds: {
+              likes: [],
+              boundaries: [],
+              communication: [!retry && invalid === 'habit-self' ? 'self' : 'target'],
+            },
+            memories: [
+              {
+                subjectId: !retry && invalid === 'subject' ? '67890' : data.contact.qq,
+                kind: 'promise',
+                text: '对象确认周六见面',
+                time: 0,
+                sourceIds: [
+                  retry || invalid === 'habit-self' || invalid === 'subject' ? 'target' : sourceId,
+                ],
+                keywords: ['见面'],
+              },
+            ],
+          };
+        });
+        const engine = new AnalysisEngine(data.store, ai, () => {
+          failed.changed();
+          completed.changed();
+        });
+        try {
+          for (const [id, senderId] of [
+            ['self', '67890'],
+            ['other', '99999'],
+            ['target', data.contact.qq],
+          ] as const) {
+            data.store.addMessage({
+              ...data.message(id),
+              senderId,
+              senderName: '相同昵称',
+              source: 'history',
+            });
+          }
+          engine.flush(data.conversation.id);
+          await failed.promise;
+          assert.equal(data.store.contact(data.contact.id)?.traitsRevision, 0);
+          assert.equal(data.store.memories(data.contact.id).length, 0);
+          assert.equal(data.store.conversation(data.conversation.id)?.consolidatedSequence, 0);
+          assert.equal(data.store.conversation(data.conversation.id)?.processedSequence, 0);
+          retry = true;
+          engine.flush(data.conversation.id);
+          await completed.promise;
+          assert.equal(data.store.contact(data.contact.id)?.traits.communication, '表达直接');
+          assert.equal(data.store.memories(data.contact.id).length, 1);
+          assert.deepEqual(data.store.memories(data.contact.id)[0]?.sourceIds, ['target']);
+        } finally {
+          await engine.stop();
+          data.cleanup();
+        }
+      },
+    );
+  }
+}
+
+for (const action of ['edit', 'pause', 'new-message'] as const) {
+  test(`归纳请求期间 ${action} 保护画像和检查点`, { timeout: 5000 }, async () => {
+    const data = fixture();
+    const started = deferred<AbortSignal>();
+    const response = deferred<unknown>();
+    const completed = watcher(
+      () => data.store.contact(data.contact.id)?.traits.communication === '用户修订',
+    );
+    const ai = new FakeAi((instruction, signal) => {
+      if (instruction === prompts.light) return light;
+      if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
+      started.resolve(signal);
+      return response.promise;
+    });
+    const engine = new AnalysisEngine(data.store, ai, completed.changed);
+    try {
+      data.store.addMessage(data.message('1'));
+      engine.flush(data.conversation.id);
+      const signal = await started.promise;
+      if (action === 'edit') {
+        data.store.saveContact({
+          ...data.contact,
+          traits: { ...data.contact.traits, communication: '用户修订' },
+          traitsRevision: 1,
+        });
+      } else if (action === 'pause') {
+        data.store.saveConversation({
+          ...data.store.conversation(data.conversation.id)!,
+          paused: true,
+        });
+        engine.cancel(data.conversation.id);
+      } else {
+        data.store.addMessage(data.message('2'));
+        engine.notify(data.conversation.id);
+      }
+      response.resolve(consolidation);
+      if (action === 'edit') {
+        await completed.promise;
+        assert.equal(data.store.contact(data.contact.id)?.traits.communication, '用户修订');
+      } else {
+        assert.equal(signal.aborted, true);
+        await engine.stop();
+        assert.equal(data.store.contact(data.contact.id)?.traitsRevision, 0);
+        assert.equal(data.store.conversation(data.conversation.id)?.consolidatedSequence, 0);
+      }
+    } finally {
+      response.resolve(consolidation);
+      await engine.stop();
+      data.cleanup();
+    }
+  });
+}

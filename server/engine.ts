@@ -48,6 +48,23 @@ export class AnalysisEngine {
     if (!conversation || !contact || contact.paused || conversation.paused) return;
     return { conversation, contact };
   }
+  private participants(contact: Contact) {
+    return {
+      self: { ...this.store.self, qq: this.store.settings.selfQq },
+      contact: { id: contact.id, qq: contact.qq, name: contact.name },
+    };
+  }
+  private attributedMessages(messages: Message[], contact: Contact) {
+    return messages.map((message) => ({
+      ...message,
+      senderRole:
+        message.senderId === this.store.settings.selfQq
+          ? 'self'
+          : message.senderId === contact.qq
+            ? 'contact'
+            : 'other',
+    }));
+  }
   notify(id: string, live = true): void {
     this.cancel(id);
     if (!this.active(id)) return;
@@ -88,7 +105,7 @@ export class AnalysisEngine {
         this.store.saveConversation({
           ...conversation,
           status: '分析失败',
-          error: 'AI 请求失败或返回格式无效。请检查 API 设置后点击重新检查。',
+          error: 'AI 请求失败、返回格式无效或归纳缺少对象证据。请检查 API 设置后点击重新检查。',
         });
         this.changed();
       })
@@ -121,13 +138,17 @@ export class AnalysisEngine {
       const historical = pending.every((message) => message.source === 'history');
       const context = {
         self: this.store.self,
+        participants: this.participants(current.contact),
         contact: current.contact,
         kind: current.conversation.kind,
         previousSummary: current.conversation.summary,
-        recentContext: this.store
-          .messages(id, 0, 10)
-          .filter((message) => message.sequence <= current.conversation.processedSequence),
-        messages: pending,
+        recentContext: this.attributedMessages(
+          this.store
+            .messages(id, 0, 10)
+            .filter((message) => message.sequence <= current.conversation.processedSequence),
+          current.contact,
+        ),
+        messages: this.attributedMessages(pending, current.contact),
         previousSignals: this.store.observations(id).slice(-5),
       };
       const result = await this.ai.call(
@@ -207,9 +228,10 @@ export class AnalysisEngine {
     } else {
       const context = {
         self: this.store.self,
+        participants: this.participants(contact),
         contact,
         summary: conversation.summary,
-        messages: recent,
+        messages: this.attributedMessages(recent, contact),
         signals: this.store.observations(id).slice(-20),
       };
       const gate = await this.ai.call(
@@ -313,15 +335,39 @@ export class AnalysisEngine {
       prompts.consolidate,
       {
         self: this.store.self,
+        participants: this.participants(contact),
+        contact,
+        kind: conversation.kind,
         traits: contact.traits,
         summary: conversation.summary,
-        messages,
+        messages: this.attributedMessages(messages, contact),
         existingMemories: this.store.memories(contact.id).slice(-60),
       },
       consolidationSchema,
       controller.signal,
     );
     if (!this.valid(id, controller)) return;
+    const available = new Map(messages.map((message) => [message.id, message]));
+    const hasContactEvidence = (sourceIds: string[]) =>
+      sourceIds.every((sourceId) => available.has(sourceId)) &&
+      sourceIds.some((sourceId) => {
+        const source = available.get(sourceId);
+        return source?.senderId === contact.qq && source.senderId !== this.store.settings.selfQq;
+      });
+    // Validate the entire result before writing; failed attribution must remain retryable.
+    for (const field of ['likes', 'boundaries', 'communication'] as const) {
+      if (
+        result.traits[field] !== contact.traits[field] &&
+        !hasContactEvidence(result.traitSourceIds[field])
+      ) {
+        throw new Error('画像变更缺少对象本人的消息证据');
+      }
+    }
+    for (const memory of result.memories) {
+      if (memory.subjectId !== contact.qq || !hasContactEvidence(memory.sourceIds)) {
+        throw new Error('事件记忆主体或消息证据不属于当前对象');
+      }
+    }
     const latestContact = this.store.contact(contact.id)!;
     // User edits made during a request take precedence over its inferred trait snapshot.
     if (latestContact.traitsRevision === contact.traitsRevision) {
@@ -331,9 +377,7 @@ export class AnalysisEngine {
         traitsRevision: latestContact.traitsRevision + 1,
       });
     }
-    const available = new Map(messages.map((message) => [message.id, message]));
     for (const memory of result.memories) {
-      if (!memory.sourceIds.every((sourceId) => available.has(sourceId))) continue;
       const source = available.get(memory.sourceIds[0]!);
       if (!source) continue;
       const fingerprint = createHash('sha256')
