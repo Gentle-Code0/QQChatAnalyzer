@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { z } from 'zod';
-import type { Contact, Snapshot } from '../shared/schema';
+import { genderSchema, type Contact, type Snapshot } from '../shared/schema';
 import { api, send, splitList } from './api';
 
 export function Field({
@@ -110,6 +110,7 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
   const [qq, setQq] = useState(contact?.qq ?? '');
   const [tags, setTags] = useState(contact?.tags.join('，') ?? '');
   const [bio, setBio] = useState(contact?.bio ?? '');
+  const [gender, setGender] = useState(contact?.gender ?? '未填写');
   const [groups, setGroups] = useState(contact?.groupIds.join('，') ?? '');
   const [traits, setTraits] = useState(
     contact?.traits ?? { likes: '', boundaries: '', communication: '' },
@@ -151,8 +152,9 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
               qq,
               tags: splitList(tags),
               bio,
+              gender,
               groupIds: splitList(groups),
-              ...(contact ? { traits } : {}),
+              traits,
             },
             contact ? 'PUT' : 'POST',
           );
@@ -227,6 +229,18 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
             <p role="status">{bridgeError}</p>
           </>
         )}
+        <Field label="性别">
+          <select
+            value={gender}
+            onChange={(event) => setGender(genderSchema.parse(event.target.value))}
+          >
+            {genderSchema.options.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="标签">
           <input
             value={tags}
@@ -234,7 +248,7 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
             placeholder="朋友，同事，慢热"
           />
         </Field>
-        <Field label="对象简介">
+        <Field label="关系简介">
           <textarea
             maxLength={4000}
             value={bio}
@@ -252,32 +266,29 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
             placeholder="可留空，仅监视私聊"
           />
         </Field>
-        {contact && (
-          <>
-            <h3>长期沟通画像</h3>
-            <p className="muted">
-              AI 在会话归纳时更新；你可以修订，正在进行的请求不会覆盖本次修订。
-            </p>
-            <Field label="喜好">
-              <textarea
-                value={traits.likes}
-                onChange={(event) => setTraits({ ...traits, likes: event.target.value })}
-              />
-            </Field>
-            <Field label="忌讳与边界">
-              <textarea
-                value={traits.boundaries}
-                onChange={(event) => setTraits({ ...traits, boundaries: event.target.value })}
-              />
-            </Field>
-            <Field label="沟通习惯">
-              <textarea
-                value={traits.communication}
-                onChange={(event) => setTraits({ ...traits, communication: event.target.value })}
-              />
-            </Field>
-          </>
-        )}
+        <h3>长期沟通画像</h3>
+        <p className="muted">AI 在会话归纳时更新；你可以修订，正在进行的请求不会覆盖本次修订。</p>
+        <Field label="喜好">
+          <textarea
+            maxLength={4000}
+            value={traits.likes}
+            onChange={(event) => setTraits({ ...traits, likes: event.target.value })}
+          />
+        </Field>
+        <Field label="忌讳与边界">
+          <textarea
+            maxLength={4000}
+            value={traits.boundaries}
+            onChange={(event) => setTraits({ ...traits, boundaries: event.target.value })}
+          />
+        </Field>
+        <Field label="沟通习惯">
+          <textarea
+            maxLength={4000}
+            value={traits.communication}
+            onChange={(event) => setTraits({ ...traits, communication: event.target.value })}
+          />
+        </Field>
       </Form>
     </section>
   );

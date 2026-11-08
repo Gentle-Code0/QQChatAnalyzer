@@ -39,6 +39,7 @@ export function Workspace({
           </h1>
           <p className="muted">{contact.bio || '从每一次对话，慢慢了解彼此。'}</p>
           <div className="tags">
+            {contact.gender !== '未填写' && <span>性别：{contact.gender}</span>}
             {contact.tags.map((tag) => (
               <span key={tag}>{tag}</span>
             ))}

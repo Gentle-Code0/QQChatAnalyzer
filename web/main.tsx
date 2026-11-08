@@ -266,6 +266,7 @@ function App() {
                   <small className="muted">QQ · {item.qq}</small>
                   <p>{item.bio || '等待写下你们的故事。'}</p>
                   <div className="tags">
+                    {item.gender !== '未填写' && <span>性别：{item.gender}</span>}
                     {item.tags.map((tag) => (
                       <span key={tag}>{tag}</span>
                     ))}

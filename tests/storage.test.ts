@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fixture } from './helpers.js';
 import { Store } from '../server/store.js';
 import { retrieveMemories } from '../server/engine.js';
@@ -61,4 +62,41 @@ test('记忆检索必须命中关键词，较旧事件权重衰减', () => {
     ['recent', 'old'],
   );
   assert.deepEqual(retrieveMemories(memories, [], now), []);
+});
+
+test('旧档案默认未填写性别并保留简介，性别和画像重新打开后保留', () => {
+  const data = fixture();
+  try {
+    const legacy = {
+      id: 'legacy',
+      name: '旧档案',
+      qq: '54321',
+      bio: '原来的关系简介',
+      traits: { likes: '读书', boundaries: '', communication: '直接沟通' },
+      createdAt: 1,
+    };
+    const database = new DatabaseSync(join(data.directory, 'chat.sqlite'));
+    try {
+      database
+        .prepare('INSERT INTO records VALUES(?,?,?)')
+        .run('contact', legacy.id, JSON.stringify(legacy));
+    } finally {
+      database.close();
+    }
+    const oldContact = data.store.contact(legacy.id);
+    assert.equal(oldContact?.gender, '未填写');
+    assert.equal(oldContact?.bio, legacy.bio);
+    assert.deepEqual(oldContact?.traits, legacy.traits);
+    data.store.saveContact({ ...data.contact, gender: '男', traits: legacy.traits });
+    const reopened = new Store(data.directory);
+    try {
+      assert.equal(reopened.contact(data.contact.id)?.gender, '男');
+      assert.deepEqual(reopened.contact(data.contact.id)?.traits, legacy.traits);
+      assert.equal(reopened.contact(legacy.id)?.bio, legacy.bio);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    data.cleanup();
+  }
 });

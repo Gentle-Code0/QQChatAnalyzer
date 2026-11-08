@@ -11,11 +11,14 @@ export const traitsSchema = z.object({
   boundaries: z.string().max(4000).default(''),
   communication: z.string().max(4000).default(''),
 });
+export const genderSchema = z.enum(['未填写', '男', '女', '其他']);
 export const contactInputSchema = z.object({
   name: z.string().trim().min(1).max(80),
   qq: z.string().regex(/^\d{5,15}$/),
   tags: z.array(z.string().min(1).max(40)).max(20).default([]),
   bio: z.string().max(4000).default(''),
+  gender: genderSchema.default('未填写'),
+  traits: traitsSchema.default({}),
   groupIds: z
     .array(z.string().regex(/^\d{5,15}$/))
     .max(50)
@@ -24,7 +27,6 @@ export const contactInputSchema = z.object({
 export const contactSchema = contactInputSchema.extend({
   id: z.string(),
   paused: z.boolean().default(false),
-  traits: traitsSchema,
   traitsRevision: z.number().int().default(0),
   createdAt: z.number(),
   historyStatus: z.string().default('待导入'),

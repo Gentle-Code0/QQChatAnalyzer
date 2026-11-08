@@ -85,7 +85,6 @@ export function createApi(application: Application, password: string) {
     const contact = contactSchema.parse({
       ...input,
       id: application.createId(),
-      traits: {},
       createdAt: Date.now(),
     });
     store.saveContact(contact);
