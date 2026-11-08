@@ -1,6 +1,6 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { z } from 'zod';
-import { genderSchema, type Contact, type Snapshot } from '../shared/schema';
+import { aiTestResultSchema, genderSchema, type Contact, type Snapshot } from '../shared/schema';
 import { api, send, splitList } from './api';
 
 export function Field({
@@ -303,6 +303,48 @@ export function SettingsForm({
   const [settings, setSettings] = useState(state.settings);
   const [apiKey, setApiKey] = useState('');
   const [qqToken, setQqToken] = useState('');
+  const [testingAi, setTestingAi] = useState(false);
+  const [aiTestMessage, setAiTestMessage] = useState('');
+  const aiTestController = useRef<AbortController | undefined>(undefined);
+  useEffect(() => {
+    setAiTestMessage('');
+    setTestingAi(false);
+    return () => {
+      aiTestController.current?.abort();
+      aiTestController.current = undefined;
+    };
+  }, [settings.baseUrl, settings.model, apiKey]);
+  async function testAi() {
+    if (aiTestController.current) return;
+    const controller = new AbortController();
+    aiTestController.current = controller;
+    setTestingAi(true);
+    setAiTestMessage('正在测试 AI 调用及回传…');
+    try {
+      const result = aiTestResultSchema.parse(
+        await api<unknown>('/settings/ai/test', {
+          method: 'POST',
+          signal: controller.signal,
+          body: JSON.stringify({ baseUrl: settings.baseUrl, model: settings.model, apiKey }),
+        }),
+      );
+      if (!controller.signal.aborted)
+        setAiTestMessage(
+          result.ok ? result.message : `连接失败（步骤：${result.step}）：${result.message}`,
+        );
+    } catch (error) {
+      if (!controller.signal.aborted)
+        setAiTestMessage(
+          `连接失败（步骤：请求应用后端或读取测试结果）：${error instanceof Error ? error.message : '请求失败'}`,
+        );
+    } finally {
+      if (aiTestController.current === controller) {
+        aiTestController.current = undefined;
+        setTestingAi(false);
+      }
+    }
+  }
+
   return (
     <section className="panel form-panel">
       <div className="eyebrow">CONNECTION & INTELLIGENCE</div>
@@ -347,6 +389,20 @@ export function SettingsForm({
             onChange={(event) => setSettings({ ...settings, model: event.target.value })}
           />
         </Field>
+        <div className="form-footer">
+          <button
+            type="button"
+            className="subtle"
+            disabled={testingAi}
+            onClick={() => void testAi()}
+          >
+            {testingAi ? '测试中…' : '测试 AI API'}
+          </button>
+          <span role="status">{aiTestMessage}</span>
+        </div>
+        <p className="muted small">
+          测试当前填写的配置；Key 留空时使用已保存的 Key。测试会产生一次模型调用，不会保存配置。
+        </p>
         <h3>QQ · SnowLuma OneBot v11</h3>
         <Field
           label="WebSocket 地址"

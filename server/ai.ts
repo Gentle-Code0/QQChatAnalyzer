@@ -1,7 +1,32 @@
 import { z } from 'zod';
-import type { Settings } from '../shared/schema.js';
+import type { Settings, AiTestStep } from '../shared/schema.js';
 import { validateEndpoint } from './bridge.js';
 import { buildContextContent, ImageContextError, type ImageResolver } from './ai-context.js';
+
+/** Only safe, locally written diagnostics are exposed; provider bodies may contain secrets. */
+export class AiCallError extends Error {
+  constructor(
+    readonly step: AiTestStep,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+function requestFailure(step: AiTestStep, signal: AbortSignal): AiCallError {
+  if (signal.aborted)
+    return new AiCallError(
+      step,
+      signal.reason instanceof Error && signal.reason.name === 'TimeoutError'
+        ? '请求超过 45 秒，请检查服务响应速度后重试。'
+        : '请求已取消。',
+    );
+  return new AiCallError(
+    step,
+    step === '发送请求'
+      ? '无法连接 AI 服务，请检查地址、网络、TLS 证书或代理设置。'
+      : '读取服务返回数据失败，请检查网络或服务状态。',
+  );
+}
 
 export const summaryResultSchema = z.object({
   summary: z.string().max(6000),
@@ -70,8 +95,17 @@ export class CompatibleAi implements AiClient {
     signal: AbortSignal,
   ): Promise<T> {
     const { settings, apiKey } = this.getConfiguration();
-    if (!apiKey) throw new Error('请先配置 AI API 密钥');
-    const endpoint = validateEndpoint(settings.baseUrl, ['http:', 'https:']);
+    if (!apiKey.trim())
+      throw new AiCallError('配置校验', '请先填写 API Key，或保存一个可用的 API Key。');
+    let endpoint: URL;
+    try {
+      endpoint = validateEndpoint(settings.baseUrl, ['http:', 'https:']);
+    } catch {
+      throw new AiCallError(
+        '配置校验',
+        'Base URL 必须是有效的 HTTP(S) 地址，且不能包含嵌入凭据、查询参数或片段。',
+      );
+    }
     endpoint.pathname =
       endpoint.pathname.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') +
       '/chat/completions';
@@ -92,42 +126,80 @@ export class CompatibleAi implements AiClient {
       ],
     });
     if (Buffer.byteLength(body) > 8 * 1024 * 1024) throw new Error('AI 请求超过大小限制');
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      signal: requestSignal,
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body,
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error(`AI API 返回 HTTP ${response.status}`);
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        redirect: 'error',
+        signal: requestSignal,
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body,
+      });
+    } catch {
+      throw requestFailure('发送请求', requestSignal);
     }
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('AI 返回空响应');
+    if (!response.ok) {
+      try {
+        await response.body?.cancel();
+      } finally {
+        const hint =
+          response.status === 401 || response.status === 403
+            ? '，请检查 API Key 和调用权限'
+            : response.status === 404
+              ? '，请检查 Base URL 和模型名称'
+              : response.status === 429
+                ? '，请检查额度或请求频率'
+                : '，请检查服务状态';
+        throw new AiCallError('HTTP 响应', `AI 服务返回 HTTP ${response.status}${hint}。`);
+      }
+    }
     const chunks: Uint8Array[] = [];
     let size = 0;
     try {
-      while (true) {
-        const part = await reader.read();
-        if (part.done) break;
-        size += part.value.length;
-        if (size > 2 * 1024 * 1024) throw new Error('AI 响应超过大小限制');
-        chunks.push(part.value);
+      const reader = response.body?.getReader();
+      if (!reader) throw new AiCallError('读取回传', 'AI 服务返回了空响应。');
+      try {
+        while (true) {
+          const part = await reader.read();
+          if (part.done) break;
+          size += part.value.length;
+          if (size > 2 * 1024 * 1024)
+            throw new AiCallError('读取回传', 'AI 回传超过 2 MiB 大小限制。');
+          chunks.push(part.value);
+        }
+      } finally {
+        try {
+          await reader.cancel();
+        } finally {
+          reader.releaseLock();
+        }
       }
-    } finally {
-      await reader.cancel();
-      reader.releaseLock();
+    } catch (error) {
+      if (error instanceof AiCallError) throw error;
+      throw requestFailure('读取回传', requestSignal);
     }
+    if (!size) throw new AiCallError('读取回传', 'AI 服务返回了空响应。');
+    let responseContent: string;
     try {
       const envelope = z
         .object({
           choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1),
         })
         .parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      return schema.parse(JSON.parse(envelope.choices[0]!.message.content));
+      responseContent = envelope.choices[0]!.message.content;
     } catch {
-      throw new Error('AI 返回的 JSON 不符合分析契约，请检查模型是否支持 JSON 输出');
+      throw new AiCallError(
+        '解析回传',
+        '服务回传不是有效的兼容协议 JSON，或缺少 choices[0].message.content。',
+      );
+    }
+    try {
+      return schema.parse(JSON.parse(responseContent));
+    } catch {
+      throw new AiCallError(
+        '校验模型输出',
+        '模型输出不是符合要求的 JSON，请检查模型是否支持 JSON 输出。',
+      );
     }
   }
 }

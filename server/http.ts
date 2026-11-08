@@ -67,6 +67,17 @@ export function createApi(application: Application, password: string) {
       application.engine.notify(conversation.id, false);
     response.json({ ok: true });
   });
+  app.post('/api/settings/ai/test', async (request, response) => {
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    response.once('close', cancel);
+    try {
+      const result = await application.testAi(request.body, controller.signal);
+      if (!controller.signal.aborted) response.json(result);
+    } finally {
+      response.off('close', cancel);
+    }
+  });
   app.get('/api/qq/friends', async (_request, response) => {
     response.json(await application.bridge?.request('get_friend_list', {}));
   });

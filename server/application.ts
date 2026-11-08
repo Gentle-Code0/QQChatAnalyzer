@@ -1,9 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { Store } from './store.js';
 import { QqBridge, type QqMessage } from './bridge.js';
-import { CompatibleAi } from './ai.js';
+import { CompatibleAi, AiCallError } from './ai.js';
 import { AnalysisEngine } from './engine.js';
-import { conversationSchema, type Contact, type Snapshot } from '../shared/schema.js';
+import {
+  aiTestInputSchema,
+  conversationSchema,
+  type AiTestResult,
+  type Contact,
+  type Snapshot,
+} from '../shared/schema.js';
 
 /** Composition root owns bridge, imports, analysis and shutdown. Constructors perform no network IO. */
 export class Application {
@@ -11,6 +18,7 @@ export class Application {
   bridge: QqBridge | undefined;
   private readonly imports = new Map<string, Promise<void>>();
   private closed = false;
+  private readonly aiTests = new Map<AbortController, Promise<AiTestResult>>();
   constructor(readonly store: Store) {
     this.engine = new AnalysisEngine(
       store,
@@ -23,6 +31,47 @@ export class Application {
       ),
       () => {},
     );
+  }
+  testAi(input: unknown, signal: AbortSignal): Promise<AiTestResult> {
+    const parsed = aiTestInputSchema.safeParse(input);
+    if (!parsed.success)
+      return Promise.resolve({
+        ok: false,
+        step: '配置校验',
+        message: '请填写有效的 Base URL、模型名称和 API Key。',
+      });
+    if (this.closed || this.aiTests.size)
+      return Promise.resolve({
+        ok: false,
+        step: '发送请求',
+        message: this.closed ? '应用正在关闭。' : '已有 AI 测试正在进行，请稍后重试。',
+      });
+    const { baseUrl, model, apiKey } = parsed.data;
+    const settings = { ...this.store.settings, baseUrl, model };
+    const key = apiKey || this.store.secret('apiKey');
+    const controller = new AbortController();
+    const task = (async (): Promise<AiTestResult> => {
+      try {
+        await new CompatibleAi(() => ({ settings, apiKey: key })).call(
+          '这是一条连接测试，不进行聊天分析。仅返回 JSON：{"ok":true}。',
+          { connectionTest: true },
+          z.object({ ok: z.literal(true) }),
+          AbortSignal.any([signal, controller.signal]),
+        );
+        return { ok: true, message: '测试成功：AI 调用及 JSON 回传正常。' };
+      } catch (error) {
+        return {
+          ok: false,
+          step: error instanceof AiCallError ? error.step : '发送请求',
+          message:
+            error instanceof AiCallError
+              ? error.message
+              : '测试请求未能完成，请检查连接或稍后重试。',
+        };
+      }
+    })().finally(() => this.aiTests.delete(controller));
+    this.aiTests.set(controller, task);
+    return task;
   }
   start(): void {
     this.reconnect();
@@ -180,7 +229,12 @@ export class Application {
   async stop(): Promise<void> {
     this.closed = true;
     this.bridge?.stop();
-    await Promise.allSettled([...this.imports.values(), this.engine.stop()]);
+    for (const controller of this.aiTests.keys()) controller.abort();
+    await Promise.allSettled([
+      ...this.aiTests.values(),
+      ...this.imports.values(),
+      this.engine.stop(),
+    ]);
     this.store.close();
   }
 }

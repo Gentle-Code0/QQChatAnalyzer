@@ -129,6 +129,26 @@ export const settingsSchema = z
     // Prefer the previously configured analysis model when opening an existing database.
     model: model ?? fullModel ?? lightModel ?? 'gpt-4o',
   }));
+export const aiTestInputSchema = z.object({
+  baseUrl: z.string().trim().min(1).max(500),
+  model: z.string().trim().min(1).max(100),
+  apiKey: z.string().trim().max(4000).optional(),
+});
+export const aiTestStepSchema = z.enum([
+  '配置校验',
+  '发送请求',
+  'HTTP 响应',
+  '读取回传',
+  '解析回传',
+  '校验模型输出',
+]);
+export const aiTestResultSchema = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), message: z.string() }),
+  z.object({ ok: z.literal(false), step: aiTestStepSchema, message: z.string() }),
+]);
+export type AiTestStep = z.infer<typeof aiTestStepSchema>;
+export type AiTestResult = z.infer<typeof aiTestResultSchema>;
+
 export type SelfProfile = z.infer<typeof selfProfileSchema>;
 export type Contact = z.infer<typeof contactSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
