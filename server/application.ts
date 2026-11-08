@@ -14,7 +14,13 @@ export class Application {
   constructor(readonly store: Store) {
     this.engine = new AnalysisEngine(
       store,
-      new CompatibleAi(() => ({ settings: store.settings, apiKey: store.secret('apiKey') })),
+      new CompatibleAi(
+        () => ({ settings: store.settings, apiKey: store.secret('apiKey') }),
+        async (image, signal) => {
+          if (!this.bridge) throw new Error('QQ 尚未连接');
+          return this.bridge.imageUrl(image, signal);
+        },
+      ),
       () => {},
     );
   }

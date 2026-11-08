@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { imageSegmentSchema, type ImageSegment, type MessageSegment } from '../shared/schema.js';
 
 const identifierSchema = z
   .union([z.string().regex(/^\d+$/), z.number().int().nonnegative()])
@@ -16,7 +17,7 @@ const eventSchema = z.object({
   group_id: identifierSchema.optional(),
   time: z.number().finite().nonnegative(),
   sender: z.object({ nickname: z.string().optional(), card: z.string().optional() }).optional(),
-  message: z.union([z.string(), z.array(segmentSchema)]).optional(),
+  message: z.union([z.string(), z.array(segmentSchema).max(512)]).optional(),
   raw_message: z.string().optional(),
 });
 export interface QqMessage {
@@ -26,6 +27,7 @@ export interface QqMessage {
   senderId: string;
   senderName: string;
   text: string;
+  segments?: MessageSegment[];
   time: number;
   mentionedSelf: boolean;
 }
@@ -59,12 +61,40 @@ export const readActions = [
   'get_group_list',
   'get_friend_msg_history',
   'get_group_msg_history',
+  'get_image',
 ] as const;
 type ReadAction = (typeof readActions)[number];
 interface PendingRequest {
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  cleanup: () => void;
+}
+
+function decodeCq(value: string): string {
+  return value
+    .replaceAll('&#91;', '[')
+    .replaceAll('&#93;', ']')
+    .replaceAll('&#44;', ',')
+    .replaceAll('&amp;', '&');
+}
+function parseCqMessage(value: string): z.infer<typeof segmentSchema>[] {
+  const segments: z.infer<typeof segmentSchema>[] = [];
+  let offset = 0;
+  for (const match of value.matchAll(/\[CQ:([a-zA-Z0-9_]+)((?:,[^\]]*)?)\]/g)) {
+    if (match.index > offset)
+      segments.push({ type: 'text', data: { text: decodeCq(value.slice(offset, match.index)) } });
+    const data: Record<string, unknown> = {};
+    for (const entry of (match[2] ?? '').split(',').slice(1)) {
+      const separator = entry.indexOf('=');
+      if (separator > 0) data[entry.slice(0, separator)] = decodeCq(entry.slice(separator + 1));
+    }
+    segments.push({ type: match[1] ?? '', data });
+    offset = match.index + match[0].length;
+    if (segments.length > 510) throw new Error('QQ 消息段超过上限');
+  }
+  if (offset < value.length)
+    segments.push({ type: 'text', data: { text: decodeCq(value.slice(offset)) } });
+  return segments;
 }
 
 export function normalizeMessage(
@@ -82,23 +112,42 @@ export function normalizeMessage(
       ? event.group_id
       : (historyPeer ?? (event.user_id === selfQq ? event.target_id : event.user_id));
   if (!peerId) return undefined;
-  const segments = event.message;
+  const upstream = Array.isArray(event.message)
+    ? event.message
+    : parseCqMessage(event.message ?? event.raw_message ?? '');
   let mentionedSelf = false;
+  const segments: MessageSegment[] = [];
   let text = '';
-  if (Array.isArray(segments)) {
-    text = segments
-      .map((segment) => {
-        if (segment.type === 'text')
-          return typeof segment.data.text === 'string' ? segment.data.text : '';
-        if (segment.type === 'at') {
-          const target = String(segment.data.qq ?? '');
-          if (target === selfQq) mentionedSelf = true;
-          return ` @${target} `;
-        }
-        return `[${segment.type}]`;
-      })
-      .join('');
-  } else text = segments ?? event.raw_message ?? '';
+  for (const segment of upstream) {
+    let part: MessageSegment;
+    if (segment.type === 'image' || segment.type === 'mface') {
+      part = imageSegmentSchema.parse({
+        type: 'image',
+        file:
+          typeof segment.data.file === 'string'
+            ? segment.data.file
+            : typeof segment.data.file_id === 'string'
+              ? segment.data.file_id
+              : undefined,
+        url: typeof segment.data.url === 'string' ? segment.data.url : undefined,
+        summary:
+          typeof segment.data.summary === 'string' ? segment.data.summary.slice(0, 300) : undefined,
+      });
+    } else {
+      let value = `[${segment.type}]`;
+      if (segment.type === 'text')
+        value = typeof segment.data.text === 'string' ? segment.data.text : '';
+      if (segment.type === 'at') {
+        const target = String(segment.data.qq ?? '');
+        if (target === selfQq) mentionedSelf = true;
+        value = ` @${target} `;
+      }
+      if (segment.type === 'face') value = `[QQ表情 ${String(segment.data.id ?? '')}]`;
+      part = { type: 'text', text: value.slice(0, Math.max(0, 20000 - text.length)) };
+    }
+    segments.push(part);
+    text += part.type === 'text' ? part.text : '[图片]';
+  }
   if (!text.trim()) return undefined;
   return {
     id: String(event.message_id),
@@ -107,6 +156,7 @@ export function normalizeMessage(
     senderId: event.user_id,
     senderName: event.sender?.card || event.sender?.nickname || event.user_id,
     text: text.slice(0, 20000),
+    segments: segments.some((part) => part.type === 'image') ? segments : undefined,
     time: event.time * 1000,
     mentionedSelf,
   };
@@ -159,7 +209,7 @@ export class QqBridge {
         if (envelope.success && envelope.data.echo) {
           const pending = this.pending.get(envelope.data.echo);
           if (!pending) return;
-          clearTimeout(pending.timer);
+          pending.cleanup();
           this.pending.delete(envelope.data.echo);
           if (envelope.data.retcode === 0) pending.resolve(envelope.data.data);
           else
@@ -181,7 +231,7 @@ export class QqBridge {
     socket.on('close', () => {
       this.connected = false;
       for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
+        pending.cleanup();
         pending.reject(new Error('QQ 连接已断开'));
       }
       this.pending.clear();
@@ -203,7 +253,12 @@ export class QqBridge {
     this.options.onStatus();
     await this.options.onConnected();
   }
-  request(action: ReadAction, params: Record<string, string | number | boolean>): Promise<unknown> {
+  request(
+    action: ReadAction,
+    params: Record<string, string | number | boolean>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (signal?.aborted) return Promise.reject(new Error('QQ 请求已取消'));
     if (!readActions.includes(action)) return Promise.reject(new Error('禁止非只读动作'));
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN)
@@ -211,19 +266,40 @@ export class QqBridge {
     if (this.pending.size >= 100) return Promise.reject(new Error('桥接请求过多'));
     const echo = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
         this.pending.delete(echo);
+      };
+      const cancel = () => {
+        cleanup();
+        reject(new Error('QQ 请求已取消'));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
         reject(new Error('QQ 只读请求超时'));
       }, 15000);
-      this.pending.set(echo, { resolve, reject, timer });
+      this.pending.set(echo, { resolve, reject, cleanup });
+      signal?.addEventListener('abort', cancel, { once: true });
       socket.send(JSON.stringify({ action, params, echo }), (error) => {
         if (error) {
-          clearTimeout(timer);
-          this.pending.delete(echo);
+          cleanup();
           reject(new Error('QQ 请求发送失败'));
         }
       });
     });
+  }
+  async imageUrl(image: ImageSegment, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted();
+    if (!this.connected) throw new Error('读取图片需要已连接且通过账号校验的 QQ');
+    if (!image.file) {
+      if (!image.url) throw new Error('消息图片缺少文件标识或地址');
+      return image.url;
+    }
+    const result = z
+      .object({ url: z.string().min(1).max(8192) })
+      .parse(await this.request('get_image', { file: image.file }, signal));
+    return result.url;
   }
   async history(
     peerId: string,
@@ -255,7 +331,7 @@ export class QqBridge {
     this.status = '已断开';
     clearTimeout(this.reconnectTimer);
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      pending.cleanup();
       pending.reject(new Error('桥接已停止'));
     }
     this.pending.clear();

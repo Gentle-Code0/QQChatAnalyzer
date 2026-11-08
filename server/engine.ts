@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
+import { ImageContextError } from './ai-context.js';
 import {
   prompts,
   summaryResultSchema,
@@ -99,13 +100,16 @@ export class AnalysisEngine {
     work.controller = controller;
     this.work.set(id, work);
     const task = this.run(id, trigger, controller)
-      .catch(() => {
+      .catch((error: unknown) => {
         if (controller.signal.aborted || !this.active(id)) return;
         const conversation = this.store.conversation(id)!;
         this.store.saveConversation({
           ...conversation,
           status: '分析失败',
-          error: 'AI 请求失败、返回格式无效或归纳缺少对象证据。请检查 API 设置后点击重新检查。',
+          error:
+            error instanceof ImageContextError
+              ? error.message
+              : 'AI 请求失败、返回格式无效或归纳缺少对象证据。请检查 API 设置后点击重新检查。',
         });
         this.changed();
       })
@@ -286,6 +290,7 @@ export class AnalysisEngine {
         ...this.store.conversation(id)!,
         consolidatedSequence: pending.at(-1)!.sequence,
       });
+      this.changed();
     }
   }
   private recordDecision(

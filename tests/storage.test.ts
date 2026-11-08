@@ -115,3 +115,28 @@ test('单模型设置兼容旧配置且优先保留显式模型名称', () => {
   assert.equal(settingsSchema.parse({ lightModel: 'only-legacy' }).model, 'only-legacy');
   assert.equal(settingsSchema.parse({ model: 'chosen', fullModel: 'legacy' }).model, 'chosen');
 });
+
+test('图文消息重新打开后保持段落顺序，重复消息不覆盖图片资料', () => {
+  const data = fixture();
+  try {
+    const message = {
+      ...data.message('picture'),
+      segments: [
+        { type: 'text' as const, text: '第一张' },
+        { type: 'image' as const, file: 'first.png', url: 'https://example.invalid/first.png' },
+        { type: 'text' as const, text: '第二张' },
+        { type: 'image' as const, file: 'second.png' },
+      ],
+    };
+    assert.equal(data.store.addMessage(message), true);
+    assert.equal(data.store.addMessage(data.message('picture')), false);
+    const reopened = new Store(data.directory);
+    try {
+      assert.deepEqual(reopened.messages(data.conversation.id)[0]?.segments, message.segments);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    data.cleanup();
+  }
+});

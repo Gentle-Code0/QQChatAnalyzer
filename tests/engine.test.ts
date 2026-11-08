@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { AnalysisEngine } from '../server/engine.js';
 import { prompts, type AiClient } from '../server/ai.js';
 import { fixture, deferred } from './helpers.js';
+import { buildContextContent } from '../server/ai-context.js';
 
 const light = {
   summary: '讨论周六见面；时间尚未回答。',
@@ -578,6 +579,127 @@ for (const action of ['edit', 'pause', 'new-message'] as const) {
       }
     } finally {
       response.resolve(consolidation);
+      await engine.stop();
+      data.cleanup();
+    }
+  });
+}
+
+for (const stage of ['summary', 'gate', 'advice', 'consolidate'] as const) {
+  test(`${stage} 取图失败不推进对应检查点，重试保留图片内容`, { timeout: 5000 }, async () => {
+    const data = fixture();
+    let fail = true;
+    const failed = watcher(
+      () => data.store.conversation(data.conversation.id)?.status === '分析失败',
+    );
+    const completed = watcher(
+      () => (data.store.conversation(data.conversation.id)?.consolidatedSequence ?? 0) > 0,
+    );
+    const ai = new FakeAi(async (instruction, signal, payload) => {
+      await buildContextContent(
+        payload,
+        async () => {
+          if (instruction === prompts[stage] && fail) throw new Error('测试图片暂时不可用');
+          return 'https://example.invalid/picture.png';
+        },
+        signal,
+      );
+      if (instruction === prompts.summary) return light;
+      if (instruction === prompts.gate) return { needed: true, reason: '需要跟进', keywords: [] };
+      if (instruction === prompts.advice) return { analysis: '根据图文判断', advice: '确认安排' };
+      return consolidation;
+    });
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      failed.changed();
+      completed.changed();
+    });
+    try {
+      data.store.addMessage({
+        ...data.message('1'),
+        segments: [
+          { type: 'text', text: '看这张图片' },
+          { type: 'image', file: 'test.png' },
+        ],
+      });
+      engine.flush(data.conversation.id);
+      await failed.promise;
+      const conversation = data.store.conversation(data.conversation.id)!;
+      assert.match(conversation.error, /无法读取消息图片/);
+      assert.equal(conversation.consolidatedSequence, 0);
+      if (stage === 'summary') assert.equal(conversation.processedSequence, 0);
+      else assert.ok(conversation.processedSequence > 0);
+      if (stage !== 'consolidate') assert.equal(conversation.lastDecisionSequence, 0);
+      else assert.ok(conversation.lastDecisionSequence > 0);
+      fail = false;
+      engine.flush(data.conversation.id);
+      await completed.promise;
+      assert.equal(data.store.decisions(data.conversation.id).length, 1);
+    } finally {
+      await engine.stop();
+      data.cleanup();
+    }
+  });
+}
+
+for (const action of ['pause', 'new-message'] as const) {
+  test(`取图期间 ${action} 取消旧任务，旧图片返回后不写入摘要`, { timeout: 5000 }, async () => {
+    const data = fixture();
+    const started = deferred<AbortSignal>();
+    const staleImage = deferred<string>();
+    let first = true;
+    const completed = watcher(
+      () => (data.store.conversation(data.conversation.id)?.processedSequence ?? 0) > 0,
+    );
+    const ai = new FakeAi(async (instruction, signal, payload) => {
+      await buildContextContent(
+        payload,
+        async () => {
+          if (first) {
+            first = false;
+            started.resolve(signal);
+            return staleImage.promise;
+          }
+          return 'https://example.invalid/new.png';
+        },
+        signal,
+      );
+      return instruction === prompts.summary
+        ? light
+        : instruction === prompts.gate
+          ? { needed: false, reason: '无需建议', keywords: [] }
+          : consolidation;
+    });
+    const engine = new AnalysisEngine(data.store, ai, completed.changed);
+    try {
+      data.store.addMessage({
+        ...data.message('1'),
+        segments: [{ type: 'image', file: 'one.png' }],
+      });
+      engine.flush(data.conversation.id);
+      const signal = await started.promise;
+      if (action === 'pause') {
+        data.store.saveConversation({
+          ...data.store.conversation(data.conversation.id)!,
+          paused: true,
+        });
+        engine.cancel(data.conversation.id);
+      } else {
+        data.store.addMessage(data.message('2'));
+        engine.flush(data.conversation.id);
+        await completed.promise;
+      }
+      assert.equal(signal.aborted, true);
+      staleImage.resolve('https://example.invalid/old.png');
+      await engine.stop();
+      assert.equal(
+        data.store.observations(data.conversation.id).length,
+        action === 'pause' ? 0 : 1,
+      );
+      if (action === 'pause')
+        assert.equal(data.store.conversation(data.conversation.id)?.processedSequence, 0);
+      else assert.equal(data.store.conversation(data.conversation.id)?.summary, light.summary);
+    } finally {
+      staleImage.resolve('https://example.invalid/old.png');
       await engine.stop();
       data.cleanup();
     }

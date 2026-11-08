@@ -4,9 +4,9 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { z } from 'zod';
 import { CompatibleAi, prompts } from '../server/ai.js';
-import { settingsSchema } from '../shared/schema.js';
+import { settingsSchema, messageSchema } from '../shared/schema.js';
 
-test('摘要、建议判断、详细建议与归纳均向配置的同一模型请求', async () => {
+test('各阶段均向同一模型发送有序的多图片上下文', async () => {
   const requests: unknown[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -27,15 +27,94 @@ test('摘要、建议判断、详细建议与归纳均向配置的同一模型�
     for (const instruction of Object.values(prompts)) {
       const result = await ai.call(
         instruction,
-        { messages: [] },
+        {
+          messages: [
+            messageSchema.parse({
+              id: 'image-message',
+              conversationId: 'test',
+              senderId: '12345',
+              senderName: '测试对象',
+              time: 1,
+              source: 'live',
+              text: '前文[图片]中间[图片]后文',
+              segments: [
+                { type: 'text', text: '前文' },
+                { type: 'image', url: 'https://example.invalid/first.png' },
+                { type: 'text', text: '中间' },
+                { type: 'image', url: 'https://example.invalid/second.png' },
+                { type: 'text', text: '后文' },
+              ],
+            }),
+          ],
+        },
         z.object({ ok: z.boolean() }),
         new AbortController().signal,
       );
       assert.equal(result.ok, true);
     }
+    await assert.rejects(
+      ai.call(
+        prompts.summary,
+        {
+          messages: [
+            messageSchema.parse({
+              id: 'invalid-image',
+              conversationId: 'test',
+              senderId: '12345',
+              senderName: '测试对象',
+              time: 1,
+              source: 'live',
+              text: '[图片]',
+              segments: [{ type: 'image', url: 'file:///invalid-test-image' }],
+            }),
+          ],
+        },
+        z.object({ ok: z.boolean() }),
+        new AbortController().signal,
+      ),
+      /HTTP\(S\)/,
+    );
     assert.equal(requests.length, 4);
     for (const request of requests) {
-      assert.equal(z.object({ model: z.string() }).parse(request).model, settings.model);
+      const parsed = z
+        .object({
+          model: z.string(),
+          messages: z.array(
+            z.object({
+              role: z.string(),
+              content: z.union([
+                z.string(),
+                z.array(
+                  z.discriminatedUnion('type', [
+                    z.object({ type: z.literal('text'), text: z.string() }),
+                    z.object({
+                      type: z.literal('image_url'),
+                      image_url: z.object({ url: z.string() }),
+                    }),
+                  ]),
+                ),
+              ]),
+            }),
+          ),
+        })
+        .parse(request);
+      assert.equal(parsed.model, settings.model);
+      const content = parsed.messages.find((message) => message.role === 'user')?.content;
+      assert.ok(Array.isArray(content));
+      assert.deepEqual(
+        content
+          .slice(2, -1)
+          .map((part) => (part.type === 'image_url' ? part.image_url.url : JSON.parse(part.text))),
+        [
+          { segment: 1, type: 'text', text: '前文' },
+          { segment: 2, type: 'image' },
+          'https://example.invalid/first.png',
+          { segment: 3, type: 'text', text: '中间' },
+          { segment: 4, type: 'image' },
+          'https://example.invalid/second.png',
+          { segment: 5, type: 'text', text: '后文' },
+        ],
+      );
     }
   } finally {
     await new Promise<void>((resolve) => {

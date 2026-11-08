@@ -35,7 +35,13 @@ test('历史分页达到上限可继续，重复边界去重，完成后重连�
             user_id: 12345,
             message_id: id,
             time: 100 + id,
-            message: `测试消息 ${id}`,
+            message: [
+              { type: 'text', data: { text: `测试消息 ${id}` } },
+              {
+                type: 'image',
+                data: { file: `test-${id}.png`, url: `https://example.invalid/${id}.png` },
+              },
+            ],
           })),
         };
       }
@@ -65,6 +71,15 @@ test('历史分页达到上限可继续，重复边界去重，完成后重连�
     assert.equal(data.store.messageCount(conversationId), 3);
     assert.equal(data.store.contact(data.contact.id)?.historyCount, 3);
     assert.deepEqual(cursors, [0, -2, -3, 0]);
+    const saved = data.store.messages(conversationId);
+    assert.equal(
+      saved.filter((message) => message.segments?.some((part) => part.type === 'image')).length,
+      3,
+    );
+    assert.deepEqual(saved.find((message) => message.id.endsWith(':-1'))?.segments, [
+      { type: 'text', text: '测试消息 -1' },
+      { type: 'image', file: 'test--1.png', url: 'https://example.invalid/-1.png' },
+    ]);
   } finally {
     await application.stop();
     data.cleanup();

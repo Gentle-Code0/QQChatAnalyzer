@@ -49,12 +49,26 @@ export const conversationSchema = z.object({
   status: z.string().default('等待消息'),
   error: z.string().default(''),
 });
+export const imageSegmentSchema = z.object({
+  type: z.literal('image'),
+  file: z.string().max(2000).optional(),
+  url: z.string().max(8192).optional(),
+  summary: z.string().max(300).optional(),
+});
+export const messageSegmentSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string().max(20000) }),
+  imageSegmentSchema,
+]);
+export type ImageSegment = z.infer<typeof imageSegmentSchema>;
+export type MessageSegment = z.infer<typeof messageSegmentSchema>;
+
 export const messageSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
   senderId: z.string(),
   senderName: z.string(),
   text: z.string().max(20000),
+  segments: z.array(messageSegmentSchema).max(512).optional(),
   time: z.number(),
   sequence: z.number().default(0),
   source: z.enum(['live', 'history']),
