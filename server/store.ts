@@ -165,6 +165,18 @@ export class Store {
       messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }),
     );
   }
+  /** Display the newest messages by send time; ingestion sequence remains an analysis checkpoint. */
+  recentMessages(conversationId: string, limit = 200): Message[] {
+    return this.database
+      .prepare(
+        'SELECT sequence,data FROM messages WHERE conversation_id=? ORDER BY time DESC,sequence DESC LIMIT ?',
+      )
+      .all(conversationId, limit)
+      .reverse()
+      .map((row) =>
+        messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }),
+      );
+  }
   pendingMessages(conversationId: string, afterSequence: number): Message[] {
     return this.database
       .prepare(

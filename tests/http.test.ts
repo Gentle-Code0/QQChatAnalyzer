@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { Application } from '../server/application.js';
 import { createApi } from '../server/http.js';
 import { fixture } from './helpers.js';
-import { analysisRunSchema, contactSchema } from '../shared/schema.js';
+import { analysisRunSchema, contactSchema, messageSchema } from '../shared/schema.js';
 
 test(
   'API 要求认证、拒绝跨来源写入，状态不暴露密钥；档案绑定不可换号，性别与初始画像可保存',
@@ -54,13 +54,21 @@ test(
       assert.equal(state.status, 200);
       assert.equal(body.includes('invalid-api-test-key'), false);
       assert.match(body, /"hasApiKey":true/);
+      data.store.addMessage({ ...data.message('new'), time: 3000 });
+      data.store.addMessage({ ...data.message('old'), time: 1000, source: 'history' });
+      data.store.addMessage({ ...data.message('middle'), time: 2000, source: 'history' });
       application.engine.notify(data.conversation.id);
       const detail = await fetch(`${base}/api/conversations/${data.conversation.id}`, {
         headers: { Cookie: cookie },
       });
-      const activity = z
-        .object({ activity: z.array(analysisRunSchema) })
-        .parse(await detail.json()).activity;
+      const displayed = z
+        .object({ activity: z.array(analysisRunSchema), messages: z.array(messageSchema) })
+        .parse(await detail.json());
+      assert.deepEqual(
+        displayed.messages.map((message) => message.id),
+        ['old', 'middle', 'new'],
+      );
+      const activity = displayed.activity;
       assert.equal(activity.at(-1)?.status, 'waiting');
       assert.equal(activity.at(-1)?.steps[0]?.label, '等待消息合并');
       assert.equal((await fetch(`${base}/api/conversations/${data.conversation.id}`)).status, 401);

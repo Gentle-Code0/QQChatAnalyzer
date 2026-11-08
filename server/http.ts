@@ -167,7 +167,7 @@ export function createApi(application: Application, password: string) {
     }
     response.json({
       activity: application.engine.activity(conversation.id),
-      messages: store.messages(conversation.id),
+      messages: store.recentMessages(conversation.id),
       memories: store.memories(conversation.contactId),
       observations: store.observations(conversation.id),
       decisions: store.decisions(conversation.id),

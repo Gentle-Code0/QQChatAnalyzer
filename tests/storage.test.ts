@@ -140,3 +140,60 @@ test('图文消息重新打开后保持段落顺序，重复消息不覆盖图�
     data.cleanup();
   }
 });
+
+test('对话显示按发送时间选择最近 200 条，较晚补读的旧消息不挤掉新消息', () => {
+  const data = fixture();
+  try {
+    data.store.addMessage({ ...data.message('live'), time: 5000 });
+    for (let index = 209; index >= 0; index--) {
+      data.store.addMessage({
+        ...data.message(`history-${index}`),
+        time: 1000 + index,
+        source: 'history',
+      });
+    }
+    const recent = data.store.recentMessages(data.conversation.id);
+    assert.equal(recent.length, 200);
+    assert.equal(recent[0]?.id, 'history-11');
+    assert.equal(recent.at(-1)?.id, 'live');
+    assert.ok(
+      recent.every((message, index) => index === 0 || message.time >= recent[index - 1]!.time),
+    );
+    assert.equal(
+      recent.some((message) => message.id === 'history-0'),
+      false,
+    );
+    // The analysis cursor must continue to see older messages inserted after live messages.
+    const pending = data.store.pendingMessages(data.conversation.id, recent.at(-1)!.sequence);
+    assert.equal(pending[0]?.id, 'history-209');
+    assert.ok(pending.every((message) => message.sequence > recent.at(-1)!.sequence));
+  } finally {
+    data.cleanup();
+  }
+});
+
+test('同一发送时间按入库序号稳定排序，过滤会话且只对选中范围排序', () => {
+  const data = fixture();
+  try {
+    for (const [id, time] of [
+      ['newest', 3000],
+      ['tie-first', 2000],
+      ['oldest', 1000],
+      ['tie-second', 2000],
+    ] as const) {
+      data.store.addMessage({ ...data.message(id), time });
+    }
+    data.store.addMessage({ ...data.message('other'), conversationId: 'other', time: 4000 });
+    assert.deepEqual(
+      data.store.recentMessages(data.conversation.id).map((message) => message.id),
+      ['oldest', 'tie-first', 'tie-second', 'newest'],
+    );
+    assert.deepEqual(
+      data.store.recentMessages(data.conversation.id, 2).map((message) => message.id),
+      ['tie-second', 'newest'],
+    );
+    assert.deepEqual(data.store.recentMessages('empty'), []);
+  } finally {
+    data.cleanup();
+  }
+});

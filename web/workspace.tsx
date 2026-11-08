@@ -181,7 +181,7 @@ export function Workspace({
                 ) : (
                   <Empty text="还没有消息" sub="连接 QQ 后，指定对象的聊天会出现在这里。" />
                 )}
-                <p className="footnote">只读观察 · 显示最近 200 条 · 不发送消息</p>
+                <p className="footnote">显示最近200条信息</p>
               </div>
             )}
             {tab === '历史记忆' && (
