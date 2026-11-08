@@ -5,6 +5,7 @@ import { createServer, type Server } from 'node:http';
 import { z } from 'zod';
 import { Application } from '../server/application.js';
 import { createApi } from '../server/http.js';
+import { AiCallError, CompatibleAi, consolidationSchema } from '../server/ai.js';
 import { aiTestResultSchema } from '../shared/schema.js';
 import { fixture, deferred } from './helpers.js';
 
@@ -302,6 +303,48 @@ test('页面断开时取消后端在途测试', { timeout: 5000 }, async () => {
     await close(api);
     await application.stop();
     await close(provider);
+    data.cleanup();
+  }
+});
+
+test('复杂归纳输出不合格时显示字段路径，隐藏收到的字段值', async (context) => {
+  const data = fixture();
+  context.mock.method(
+    globalThis,
+    'fetch',
+    async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  traits: { likes: 'invalid-private-test-detail'.repeat(200) },
+                  memories: [],
+                }),
+              },
+            },
+          ],
+        }),
+      ),
+  );
+  const ai = new CompatibleAi(() => ({
+    settings: data.store.settings,
+    apiKey: 'invalid-test-key',
+  }));
+  try {
+    await assert.rejects(
+      ai.call('test', {}, consolidationSchema, new AbortController().signal),
+      (error: unknown) => {
+        assert.ok(error instanceof AiCallError);
+        assert.equal(error.step, '校验模型输出');
+        assert.match(error.message, /traitSourceIds/);
+        assert.match(error.message, /traits.likes/);
+        assert.equal(error.message.includes('invalid-private-test-detail'), false);
+        return true;
+      },
+    );
+  } finally {
     data.cleanup();
   }
 });

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { AnalysisEngine } from '../server/engine.js';
-import { prompts, type AiClient } from '../server/ai.js';
+import { AiCallError, prompts, type AiClient } from '../server/ai.js';
 import { fixture, deferred } from './helpers.js';
 import { buildContextContent } from '../server/ai-context.js';
 
@@ -513,6 +513,17 @@ for (const kind of ['private', 'group'] as const) {
           }
           engine.flush(data.conversation.id);
           await failed.promise;
+          const error = data.store.conversation(data.conversation.id)?.error ?? '';
+          assert.match(error, /画像与记忆归纳失败/);
+          assert.ok(
+            error.includes(
+              invalid === 'habit-self'
+                ? '画像证据校验'
+                : invalid === 'subject'
+                  ? '记忆主体校验'
+                  : '记忆证据校验',
+            ),
+          );
           assert.equal(data.store.contact(data.contact.id)?.traitsRevision, 0);
           assert.equal(data.store.memories(data.contact.id).length, 0);
           assert.equal(data.store.conversation(data.conversation.id)?.consolidatedSequence, 0);
@@ -705,3 +716,64 @@ for (const action of ['pause', 'new-message'] as const) {
     }
   });
 }
+
+for (const [stage, label] of [
+  ['summary', '摘要更新'],
+  ['gate', '建议必要性判断'],
+  ['advice', '详细建议生成'],
+  ['consolidate', '画像与记忆归纳'],
+] as const) {
+  test(`${label} 保留请求失败步骤和安全原因，不推进失败阶段进度`, { timeout: 5000 }, async () => {
+    const data = fixture();
+    const failed = watcher(
+      () => data.store.conversation(data.conversation.id)?.status === '分析失败',
+    );
+    const ai = new FakeAi((instruction) => {
+      if (instruction === prompts[stage])
+        throw new AiCallError('HTTP 响应', 'AI 服务返回 HTTP 429，请检查额度或请求频率。');
+      if (instruction === prompts.summary) return light;
+      if (instruction === prompts.gate) return { needed: true, reason: '需要跟进', keywords: [] };
+      if (instruction === prompts.advice) return { analysis: '根据聊天判断', advice: '确认安排' };
+      return consolidation;
+    });
+    const engine = new AnalysisEngine(data.store, ai, failed.changed);
+    try {
+      data.store.addMessage(data.message('1'));
+      engine.flush(data.conversation.id);
+      await failed.promise;
+      const conversation = data.store.conversation(data.conversation.id)!;
+      assert.ok(conversation.error.includes(`${label}失败（步骤：HTTP 响应）`));
+      assert.match(conversation.error, /429/);
+      assert.equal(conversation.consolidatedSequence, 0);
+      if (stage === 'summary') assert.equal(conversation.processedSequence, 0);
+      if (stage === 'gate' || stage === 'advice')
+        assert.equal(conversation.lastDecisionSequence, 0);
+    } finally {
+      await engine.stop();
+      data.cleanup();
+    }
+  });
+}
+
+test('未知分析异常不向页面暴露原始聊天或密钥', { timeout: 5000 }, async () => {
+  const data = fixture();
+  const failed = watcher(
+    () => data.store.conversation(data.conversation.id)?.status === '分析失败',
+  );
+  const ai = new FakeAi(() => {
+    throw new Error('invalid-private-test-detail');
+  });
+  const engine = new AnalysisEngine(data.store, ai, failed.changed);
+  try {
+    data.store.addMessage(data.message('1'));
+    engine.flush(data.conversation.id);
+    await failed.promise;
+    const error = data.store.conversation(data.conversation.id)?.error ?? '';
+    assert.match(error, /摘要更新失败.*AI 调用/);
+    assert.equal(error.includes('invalid-private-test-detail'), false);
+    assert.equal(data.store.conversation(data.conversation.id)?.processedSequence, 0);
+  } finally {
+    await engine.stop();
+    data.cleanup();
+  }
+});

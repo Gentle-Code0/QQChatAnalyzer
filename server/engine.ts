@@ -1,8 +1,10 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { z } from 'zod';
 import { Store } from './store.js';
 import { ImageContextError } from './ai-context.js';
 import {
   prompts,
+  AiCallError,
   summaryResultSchema,
   gateResultSchema,
   adviceResultSchema,
@@ -10,6 +12,9 @@ import {
   type AiClient,
 } from './ai.js';
 import type { Contact, Conversation, Message, Memory } from '../shared/schema.js';
+
+type AnalysisStage = '摘要更新' | '建议必要性判断' | '详细建议生成' | '画像与记忆归纳';
+class AnalysisFailure extends Error {}
 
 interface ConversationWork {
   controller?: AbortController;
@@ -107,9 +112,9 @@ export class AnalysisEngine {
           ...conversation,
           status: '分析失败',
           error:
-            error instanceof ImageContextError
+            error instanceof AnalysisFailure
               ? error.message
-              : 'AI 请求失败、返回格式无效或归纳缺少对象证据。请检查 API 设置后点击重新检查。',
+              : '分析失败（步骤：处理或保存结果）。本阶段未完成，请点击重新检查；若持续失败，请检查本地服务状态。',
         });
         this.changed();
       })
@@ -124,6 +129,30 @@ export class AnalysisEngine {
       this.work.get(id)?.controller === controller &&
       this.active(id) !== undefined
     );
+  }
+  private async callAi<T>(
+    stage: AnalysisStage,
+    instruction: string,
+    context: unknown,
+    schema: z.ZodType<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    try {
+      return await this.ai.call(instruction, context, schema, signal);
+    } catch (error) {
+      if (error instanceof AiCallError)
+        throw new AnalysisFailure(`${stage}失败（步骤：${error.step}）：${error.message}`);
+      if (error instanceof ImageContextError)
+        throw new AnalysisFailure(`${stage}失败（步骤：读取消息图片）：${error.message}`);
+      if (error instanceof z.ZodError)
+        throw new AnalysisFailure(
+          `${stage}失败（步骤：校验模型输出）：输出字段缺失或不符合要求，请重新检查。`,
+        );
+      // Unknown errors may include chat or credentials. Never display their raw messages.
+      throw new AnalysisFailure(
+        `${stage}失败（步骤：AI 调用）：请求未能完成，请重新检查；若持续失败，请检查服务连接和模型兼容性。`,
+      );
+    }
   }
   private async run(
     id: string,
@@ -155,7 +184,8 @@ export class AnalysisEngine {
         messages: this.attributedMessages(pending, current.contact),
         previousSignals: this.store.observations(id).slice(-5),
       };
-      const result = await this.ai.call(
+      const result = await this.callAi(
+        '摘要更新',
         prompts.summary,
         context,
         summaryResultSchema,
@@ -237,7 +267,13 @@ export class AnalysisEngine {
         messages: this.attributedMessages(recent, contact),
         signals: this.store.observations(id).slice(-20),
       };
-      const gate = await this.ai.call(prompts.gate, context, gateResultSchema, controller.signal);
+      const gate = await this.callAi(
+        '建议必要性判断',
+        prompts.gate,
+        context,
+        gateResultSchema,
+        controller.signal,
+      );
       if (!this.valid(id, controller)) return;
       if (!gate.needed) this.recordDecision(id, false, gate.reason, '', trigger, []);
       else {
@@ -246,7 +282,8 @@ export class AnalysisEngine {
           gate.keywords,
           Date.now(),
         );
-        const result = await this.ai.call(
+        const result = await this.callAi(
+          '详细建议生成',
           prompts.advice,
           { ...context, memories, gate },
           adviceResultSchema,
@@ -327,7 +364,8 @@ export class AnalysisEngine {
     controller: AbortController,
   ): Promise<void> {
     const { contact, conversation } = this.active(id)!;
-    const result = await this.ai.call(
+    const result = await this.callAi(
+      '画像与记忆归纳',
       prompts.consolidate,
       {
         self: this.store.self,
@@ -356,12 +394,22 @@ export class AnalysisEngine {
         result.traits[field] !== contact.traits[field] &&
         !hasContactEvidence(result.traitSourceIds[field])
       ) {
-        throw new Error('画像变更缺少对象本人的消息证据');
+        const label = { likes: '喜好', boundaries: '忌讳与边界', communication: '沟通习惯' }[field];
+        throw new AnalysisFailure(
+          `画像与记忆归纳失败（步骤：画像证据校验）：“${label}”的修改缺少对象本人的有效消息证据。来源须来自本批消息，且至少包含对象本人发言。本批归纳结果未保存，请重新检查。`,
+        );
       }
     }
     for (const memory of result.memories) {
-      if (memory.subjectId !== contact.qq || !hasContactEvidence(memory.sourceIds)) {
-        throw new Error('事件记忆主体或消息证据不属于当前对象');
+      if (memory.subjectId !== contact.qq) {
+        throw new AnalysisFailure(
+          '画像与记忆归纳失败（步骤：记忆主体校验）：模型将事件记忆归属给了当前对象以外的人。本批归纳结果未保存，请重新检查。',
+        );
+      }
+      if (!hasContactEvidence(memory.sourceIds)) {
+        throw new AnalysisFailure(
+          '画像与记忆归纳失败（步骤：记忆证据校验）：事件来源不属于本批消息，或未包含对象本人发言。本批归纳结果未保存，请重新检查。',
+        );
       }
     }
     const latestContact = this.store.contact(contact.id)!;

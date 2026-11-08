@@ -193,14 +193,42 @@ export class CompatibleAi implements AiClient {
         '服务回传不是有效的兼容协议 JSON，或缺少 choices[0].message.content。',
       );
     }
+    let output: unknown;
     try {
-      return schema.parse(JSON.parse(responseContent));
+      output = JSON.parse(responseContent);
     } catch {
       throw new AiCallError(
         '校验模型输出',
-        '模型输出不是符合要求的 JSON，请检查模型是否支持 JSON 输出。',
+        '模型输出不是有效的 JSON，请检查模型是否支持 JSON 输出。',
       );
     }
+    const result = schema.safeParse(output);
+    if (!result.success) {
+      // Report schema paths only: issue messages and received values may contain private content.
+      const fields = [
+        ...new Set(
+          result.error.issues
+            .slice(0, 6)
+            .map(
+              (issue) =>
+                issue.path
+                  .map((part) =>
+                    typeof part === 'number'
+                      ? String(part)
+                      : /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)
+                        ? part
+                        : '字段',
+                  )
+                  .join('.') || '整体输出',
+            ),
+        ),
+      ];
+      throw new AiCallError(
+        '校验模型输出',
+        `模型输出字段缺失或不符合要求：${fields.join('、')}。本阶段结果未保存，请重新检查。`,
+      );
+    }
+    return result.data;
   }
 }
 
