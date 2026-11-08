@@ -116,6 +116,14 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
   );
   const [friends, setFriends] = useState<{ user_id: string | number; nickname: string }[]>([]);
   const [bridgeError, setBridgeError] = useState('');
+  const [friendSearch, setFriendSearch] = useState('');
+  const friendQuery = friendSearch.trim().toLocaleLowerCase();
+  const filteredFriends = friends.filter(
+    (friend) =>
+      String(friend.user_id).includes(friendQuery) ||
+      friend.nickname.toLocaleLowerCase().includes(friendQuery),
+  );
+  const selectedFriend = friends.find((friend) => String(friend.user_id) === qq);
   async function loadFriends() {
     try {
       const result = await api<unknown>('/qq/friends');
@@ -176,25 +184,45 @@ export function ContactForm({ contact, done }: { contact?: Contact; done: () => 
               从已连接的 QQ 读取好友
             </button>
             {friends.length > 0 && (
-              <Field label="选择好友">
-                <select
-                  value={qq}
-                  onChange={(event) => {
-                    setQq(event.target.value);
-                    const friend = friends.find(
-                      (item) => String(item.user_id) === event.target.value,
-                    );
-                    if (friend) setName(friend.nickname);
-                  }}
-                >
-                  <option value="">请选择</option>
-                  {friends.map((friend) => (
-                    <option key={friend.user_id} value={friend.user_id}>
-                      {friend.nickname} · {friend.user_id}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              <>
+                <Field label="搜索好友">
+                  <input
+                    type="search"
+                    value={friendSearch}
+                    onChange={(event) => setFriendSearch(event.target.value)}
+                    placeholder="输入 QQ 号或 QQ 昵称"
+                  />
+                </Field>
+                <Field label="选择好友">
+                  <select
+                    value={qq}
+                    onChange={(event) => {
+                      setQq(event.target.value);
+                      const friend = friends.find(
+                        (item) => String(item.user_id) === event.target.value,
+                      );
+                      if (friend) setName(friend.nickname);
+                    }}
+                  >
+                    <option value="">请选择</option>
+                    {selectedFriend && !filteredFriends.includes(selectedFriend) && (
+                      <option value={selectedFriend.user_id}>
+                        {selectedFriend.nickname} · {selectedFriend.user_id}（已选择）
+                      </option>
+                    )}
+                    {filteredFriends.map((friend) => (
+                      <option key={friend.user_id} value={friend.user_id}>
+                        {friend.nickname} · {friend.user_id}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <p className="muted" role="status">
+                  {filteredFriends.length > 0
+                    ? `找到 ${filteredFriends.length} 位好友`
+                    : '没有匹配的好友，请尝试其他 QQ 号或昵称。'}
+                </p>
+              </>
             )}
             <p role="status">{bridgeError}</p>
           </>
