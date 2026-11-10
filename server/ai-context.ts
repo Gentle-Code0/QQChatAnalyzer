@@ -1,16 +1,31 @@
 import { z } from 'zod';
 import { beginProgress, type ProgressReporter } from './progress.js';
-import { messageSchema, type ImageSegment, type MessageSegment } from '../shared/schema.js';
+import {
+  messageSchema,
+  messageSegmentSchema,
+  imageSegmentSchema,
+  imageAnalysisSchema,
+  type ImageSegment,
+} from '../shared/schema.js';
 
 export class ImageContextError extends Error {}
 export type ImageResolver = (image: ImageSegment, signal: AbortSignal) => Promise<string>;
 export type ContentPart =
   { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 
-const contextMessageSchema = messageSchema.extend({
+const analyzedImageSegmentSchema = imageSegmentSchema.extend({
+  analysis: imageAnalysisSchema.optional(),
+});
+export const contextMessageSchema = messageSchema.extend({
+  segments: z
+    .array(
+      z.discriminatedUnion('type', [messageSegmentSchema.options[0], analyzedImageSegmentSchema]),
+    )
+    .max(512)
+    .optional(),
   senderRole: z.enum(['self', 'contact', 'other']).optional(),
 });
-const contextSchema = z
+export const contextSchema = z
   .object({
     recentContext: z.array(contextMessageSchema).max(200).optional(),
     messages: z.array(contextMessageSchema).max(200).optional(),
@@ -74,11 +89,23 @@ export async function buildContextContent(
       type: 'text',
       text: JSON.stringify({ section, message: attribution }),
     });
-    const parts: MessageSegment[] = segments?.length ? segments : [{ type: 'text', text }];
+    const parts = segments?.length ? segments : [{ type: 'text' as const, text }];
     for (const [index, part] of parts.entries()) {
       signal.throwIfAborted();
       if (part.type === 'text') {
         content.push({ type: 'text', text: JSON.stringify({ segment: index + 1, ...part }) });
+        continue;
+      }
+      if (part.analysis) {
+        content.push({
+          type: 'text',
+          text: JSON.stringify({
+            segment: index + 1,
+            type: 'image',
+            imageAnalysis: part.analysis,
+            interpretation: '图片本身的独立分析，不代表本次发送的意图；须结合当前消息上下文判断。',
+          }),
+        });
         continue;
       }
       const key = JSON.stringify(part);

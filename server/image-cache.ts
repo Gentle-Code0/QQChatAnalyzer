@@ -78,7 +78,7 @@ export class ImageAnalysisCache {
       throw error;
     }
   }
-  bind(
+  private bind(
     account: string,
     digest: string,
     occurrenceKey: string,

@@ -5,6 +5,8 @@ import { once } from 'node:events';
 import { z } from 'zod';
 import sharp from 'sharp';
 import { prepareImage } from '../server/images.js';
+import { ImageAnalysisService } from '../server/image-analysis.js';
+import { fixture } from './helpers.js';
 import { CompatibleAi, prompts } from '../server/ai.js';
 import type { ProgressEvent } from '../server/progress.js';
 import { settingsSchema, messageSchema } from '../shared/schema.js';
@@ -190,3 +192,110 @@ test('旧式图片 URL 被拒绝时，内嵌图片让各阶段按原顺序成功
     });
   }
 });
+
+test(
+  '独立图片分析仅首次传图，聊天上下文只包含带位置的文字分析，重复发送无需第二次视觉请求',
+  { timeout: 5000 },
+  async () => {
+    const data = fixture();
+    const bytes = await sharp({ create: { width: 2, height: 2, channels: 3, background: 'red' } })
+      .png()
+      .toBuffer();
+    const requests: { visual: boolean; content: string }[] = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const input = z
+        .object({
+          messages: z.array(
+            z.object({
+              content: z.union([z.string(), z.array(z.object({ type: z.string() }).passthrough())]),
+            }),
+          ),
+        })
+        .parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      const content = JSON.stringify(input.messages.at(-1)?.content);
+      const visual = content.includes('"type":"image_url"');
+      requests.push({ visual, content });
+      response.setHeader('Content-Type', 'application/json');
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify(
+                  visual
+                    ? { description: '红色测试图', limitations: '只描述图片本身' }
+                    : { ok: true },
+                ),
+              },
+            },
+          ],
+        }),
+      );
+    }).listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const settings = settingsSchema.parse({
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      model: 'invalid-test-model',
+    });
+    const ai = new CompatibleAi(() => ({ settings, apiKey: 'invalid-test-key' }));
+    const images = new ImageAnalysisService({
+      cache: data.store.imageCache,
+      configuration: () => ({ account: '10001', model: settings.model }),
+      resolveImage: async (image) => image.url!,
+      download: async () => bytes,
+      analyzeImage: (image, signal, report) => ai.analyzeImage(image, signal, report),
+    });
+    try {
+      for (const id of ['one', 'two']) {
+        const prepared = await images.prepareContext(
+          {
+            messages: [
+              {
+                ...data.message(id),
+                segments: [
+                  { type: 'text', text: `第${id}次发送` },
+                  { type: 'image', file: id, url: `https://gchat.qpic.cn/${id}` },
+                ],
+              },
+            ],
+          },
+          new AbortController().signal,
+        );
+        await ai.call(
+          '仅返回 {ok:true}',
+          prepared.context,
+          z.object({ ok: z.literal(true) }),
+          new AbortController().signal,
+        );
+      }
+      assert.equal(requests.length, 3);
+      assert.deepEqual(
+        requests.map((item) => item.visual),
+        [true, false, false],
+      );
+      assert.ok(requests[0]?.content.includes('data:image/'));
+      assert.ok(!requests[0]?.content.includes('senderId'));
+      assert.ok(
+        requests
+          .slice(1)
+          .every(
+            (item) =>
+              item.content.includes('红色测试图') &&
+              item.content.includes('senderId') &&
+              item.content.includes('endMessage'),
+          ),
+      );
+      assert.ok(requests[2]?.content.includes('第two次发送'));
+    } finally {
+      images.stop();
+      data.cleanup();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  },
+);

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { Store } from './store.js';
 import { QqBridge, type QqMessage } from './bridge.js';
 import { CompatibleAi, AiCallError } from './ai.js';
+import { ImageAnalysisService } from './image-analysis.js';
 import { AnalysisEngine } from './engine.js';
 import {
   aiTestInputSchema,
@@ -15,23 +16,32 @@ import {
 /** Composition root owns bridge, imports, analysis and shutdown. Constructors perform no network IO. */
 export class Application {
   readonly engine: AnalysisEngine;
+  readonly images: ImageAnalysisService;
   bridge: QqBridge | undefined;
   private readonly imports = new Map<string, Promise<void>>();
   private closed = false;
   private readonly aiTests = new Map<AbortController, Promise<AiTestResult>>();
   constructor(readonly store: Store) {
-    this.engine = new AnalysisEngine(
-      store,
-      new CompatibleAi(
-        () => ({ settings: store.settings, apiKey: store.secret('apiKey') }),
-        async (image, signal) => {
-          if (!this.bridge) throw new Error('QQ 尚未连接');
-          return this.bridge.imageUrl(image, signal);
-        },
-      ),
-      () => {},
+    const ai = new CompatibleAi(
+      () => ({ settings: store.settings, apiKey: store.secret('apiKey') }),
+      async (image, signal) => {
+        if (!this.bridge) throw new Error('QQ 尚未连接');
+        return this.bridge.imageUrl(image, signal);
+      },
     );
+    this.images = new ImageAnalysisService({
+      cache: store.imageCache,
+      configuration: () => ({ account: store.settings.selfQq, model: store.settings.model }),
+      resolveImage: async (image, signal) => {
+        if (!this.bridge) throw new Error('QQ 尚未连接');
+        return this.bridge.imageUrl(image, signal);
+      },
+      analyzeImage: (image, signal, report) => ai.analyzeImage(image, signal, report),
+      cleanupFailed: () => console.error('图片分析缓存定时清理失败'),
+    });
+    this.engine = new AnalysisEngine(store, ai, () => {}, this.images);
   }
+
   testAi(input: unknown, signal: AbortSignal): Promise<AiTestResult> {
     const parsed = aiTestInputSchema.safeParse(input);
     if (!parsed.success)
@@ -74,6 +84,7 @@ export class Application {
     return task;
   }
   start(): void {
+    this.images.start();
     this.reconnect();
     if (this.store.secret('apiKey')) {
       for (const conversation of this.store.conversations())
@@ -230,6 +241,7 @@ export class Application {
   }
   async stop(): Promise<void> {
     this.closed = true;
+    this.images.stop();
     this.bridge?.stop();
     for (const controller of this.aiTests.keys()) controller.abort();
     await Promise.allSettled([

@@ -6,7 +6,7 @@ import sharp from 'sharp';
 import { ImageContextError, type ContentPart } from './ai-context.js';
 import { beginProgress, type ProgressReporter } from './progress.js';
 
-const MAX_DOWNLOAD = 10 * 1024 * 1024;
+export const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 const MAX_NORMALIZED = 4 * 1024 * 1024;
 const MAX_TOTAL = 12 * 1024 * 1024;
 const privateV4 = new BlockList();
@@ -99,7 +99,7 @@ export async function downloadQqImage(value: string, signal: AbortSignal): Promi
                 throw new ImageContextError(
                   `QQ 图片下载返回 HTTP ${response.statusCode ?? '未知'}（不跟随重定向），请重新读取图片。`,
                 );
-              if (Number(response.headers['content-length'] ?? 0) > MAX_DOWNLOAD)
+              if (Number(response.headers['content-length'] ?? 0) > MAX_IMAGE_DOWNLOAD_BYTES)
                 throw new ImageContextError('QQ 图片超过单张 10 MiB 下载限制。');
               const chunks: Buffer[] = [];
               let size = 0;
@@ -107,7 +107,7 @@ export async function downloadQqImage(value: string, signal: AbortSignal): Promi
                 const chunk: unknown = value;
                 if (!Buffer.isBuffer(chunk)) throw new ImageContextError('QQ 图片返回了无效数据。');
                 size += chunk.length;
-                if (size > MAX_DOWNLOAD)
+                if (size > MAX_IMAGE_DOWNLOAD_BYTES)
                   throw new ImageContextError('QQ 图片超过单张 10 MiB 下载限制。');
                 chunks.push(chunk);
               }
@@ -154,7 +154,7 @@ export async function prepareImage(
   const downloaded = beginProgress(report, 'tool', '下载 QQ 图片');
   const bytes = await download(url, signal);
   signal.throwIfAborted();
-  if (!bytes.length || bytes.length > MAX_DOWNLOAD)
+  if (!bytes.length || bytes.length > MAX_IMAGE_DOWNLOAD_BYTES)
     throw new ImageContextError('QQ 图片为空或超过单张 10 MiB 限制。');
   downloaded(`已读取 ${bytes.length} 字节，图片未写入磁盘`);
   const decoded = beginProgress(report, 'tool', '解码并统一图片格式');

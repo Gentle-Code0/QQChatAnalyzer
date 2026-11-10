@@ -9,6 +9,8 @@ import {
   selectDuplicateMemories,
   selectRelatedTraits,
 } from './context-selection.js';
+import type { ImageAnalysisService } from './image-analysis.js';
+import type { ImageEvidence } from '../shared/schema.js';
 import { Store } from './store.js';
 import { ImageContextError } from './ai-context.js';
 import {
@@ -67,6 +69,7 @@ export class AnalysisEngine {
     private readonly store: Store,
     private readonly ai: AiClient,
     private readonly changed: () => void,
+    private readonly images?: ImageAnalysisService,
   ) {}
 
   activity(id: string): AnalysisRun[] {
@@ -298,18 +301,25 @@ export class AnalysisEngine {
     context: unknown,
     schema: z.ZodType<T>,
     controller: AbortController,
+    captureImages?: (evidence: ImageEvidence[]) => void,
   ): Promise<T> {
     const run = this.work.get(id)?.run;
     const complete = this.beginStep(id, 'ai', stage);
     try {
+      const report = (event: ProgressEvent) => {
+        if (run && this.valid(id, controller)) this.reportProgress(run, event);
+      };
+      const prepared = this.images
+        ? await this.images.prepareContext(context, controller.signal, report)
+        : { context, imageEvidence: [] };
+      controller.signal.throwIfAborted();
+      captureImages?.(prepared.imageEvidence);
       const result = await this.ai.call(
         instruction,
-        context,
+        prepared.context,
         schema,
         controller.signal,
-        (event) => {
-          if (run && this.valid(id, controller)) this.reportProgress(run, event);
-        },
+        report,
       );
       complete();
       return result;
@@ -613,6 +623,7 @@ export class AnalysisEngine {
       messages,
       contact.id,
     ).map(({ id, kind, text, time }) => ({ id, kind, text, time }));
+    let imageEvidence: ImageEvidence[] = [];
     const result = await this.callAi(
       id,
       '画像与记忆归纳',
@@ -627,6 +638,9 @@ export class AnalysisEngine {
       },
       consolidationSchema,
       controller,
+      (evidence) => {
+        imageEvidence = evidence;
+      },
     );
     if (!this.valid(id, controller)) return;
     const evidenceDone = this.beginStep(id, 'tool', '校验对象身份与消息证据');
@@ -689,6 +703,10 @@ export class AnalysisEngine {
         .digest('hex');
       this.store.saveMemory({
         ...memory,
+        imageEvidence: imageEvidence.filter(
+          (evidence) =>
+            memory.sourceIds.includes(evidence.messageId) && evidence.conversationId === id,
+        ),
         id: fingerprint,
         contactId: contact.id,
         time: source.time,

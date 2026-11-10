@@ -196,6 +196,30 @@ export function Workspace({
                             <span key={keyword}>{keyword}</span>
                           ))}
                         </div>
+                        {!!memory.imageEvidence?.length && (
+                          <details>
+                            <summary>图片依据 · {memory.imageEvidence.length} 张</summary>
+                            {memory.imageEvidence.map((evidence) => (
+                              <div
+                                key={`${evidence.conversationId}:${evidence.messageId}:${evidence.segmentIndex}`}
+                              >
+                                <small className="muted">
+                                  {evidence.senderName} · {formatTime(evidence.time)} · 消息{' '}
+                                  {evidence.messageId} 第 {evidence.segmentIndex + 1} 段
+                                </small>
+                                <p className="prewrap">{evidence.analysis.description}</p>
+                                {evidence.analysis.limitations && (
+                                  <p className="muted small prewrap">
+                                    {evidence.analysis.limitations}
+                                  </p>
+                                )}
+                                {evidence.analysis.scope === 'first-frame' && (
+                                  <p className="muted small">动图仅分析首帧。</p>
+                                )}
+                              </div>
+                            ))}
+                          </details>
+                        )}
                         <small className="muted">
                           参考权重{' '}
                           {(
