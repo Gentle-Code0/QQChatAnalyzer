@@ -41,7 +41,14 @@ function requestFailure(step: AiTestStep, signal: AbortSignal): AiCallError {
   );
 }
 
+export const summaryAdviceSignalSchema = z.object({
+  worthChecking: z.boolean(),
+  reason: z.string().trim().min(1).max(500),
+});
+export type SummaryAdviceSignal = z.infer<typeof summaryAdviceSignalSchema>;
+
 export const summaryResultSchema = z.object({
+  adviceSignal: summaryAdviceSignalSchema,
   compressedPreviousSummary: z.string().max(analysisContextLimits.retainedSummaryCharacters),
   summary: z.string().max(analysisContextLimits.currentSummaryCharacters),
   relevant: z.boolean(),
@@ -294,7 +301,7 @@ export class CompatibleAi implements AiClient {
 }
 
 export const prompts = {
-  summary: `在同一次请求中先进一步压缩 previousSummary，再归纳本批 messages。compressedPreviousSummary 必须是旧摘要的更短版本，不超过 summaryBudget.retainedCharacters；删去久远且已解决的闲聊和细节，优先保留仍未解决的问题、约定、边界与重要变化，禁止复制旧摘要原文或恢复已被丢弃的内容。summary 只写本批新增内容，最多 ${analysisContextLimits.currentSummaryCharacters} 字符；必要时可重新提及本批明确涉及的未解决事项，不能机械重复旧背景。合并后总摘要最多 ${analysisContextLimits.summaryCharacters} 字符。recentContext 是用于理解省略、指代和承接问题的文字节选，不是新增事实来源。保留说话者身份与时间，不把背景推测写成事实。群聊 relevant 仅当对象谈及用户、回应用户或与用户相关的话题才为 true，参考别名、提及与上下文。无关时 compressedPreviousSummary 和 summary 均返回空字符串，后台保留原摘要。输出 {compressedPreviousSummary,summary,relevant,significant,attitude,emotion,mood,reason}。attitude 是对用户的态度，emotion 是情绪效价，范围均为 -100 到100；缺少证据用0并说明。significant 仅明确突变为true。`,
+  summary: `在同一次请求中先进一步压缩 previousSummary，再归纳本批 messages。compressedPreviousSummary 必须是旧摘要的更短版本，不超过 summaryBudget.retainedCharacters；删去久远且已解决的闲聊和细节，优先保留仍未解决的问题、约定、边界与重要变化，禁止复制旧摘要原文或恢复已被丢弃的内容。summary 只写本批新增内容，最多 ${analysisContextLimits.currentSummaryCharacters} 字符；必要时可重新提及本批明确涉及的未解决事项，不能机械重复旧背景。合并后总摘要最多 ${analysisContextLimits.summaryCharacters} 字符。recentContext 是用于理解省略、指代和承接问题的文字节选，不是新增事实来源。保留说话者身份与时间，不把背景推测写成事实。群聊 relevant 仅当对象谈及用户、回应用户或与用户相关的话题才为 true，参考别名、提及与上下文。无关时 compressedPreviousSummary 和 summary 均返回空字符串，后台保留原摘要。同时顺便输出 adviceSignal:{worthChecking:boolean,reason:string}，表示是否值得进入独立的建议必要性判断；这不是完整建议，也不要求生成建议文字。普通寒暄、无实质变化的闲聊返回 false；有待处理约定、明确困扰、关系或边界问题等可能需要行动时返回 true，拿不准但值得进一步检查也可返回 true。reason 用不超过500字符简述依据。不要为了触发检查而夸大态度或情绪变化；significant 与 adviceSignal 独立判断，群聊无关内容返回 worthChecking:false。输出 {compressedPreviousSummary,summary,relevant,significant,attitude,emotion,mood,reason,adviceSignal}。attitude 是对用户的态度，emotion 是情绪效价，范围均为 -100 到100；缺少证据用0并说明。significant 仅明确突变为true。`,
   gate: '主要根据紧凑 summary、signals 中的变化指标和少量 messages 证据节选，判断此刻是否有必要提醒用户或提供行动建议。evidenceCoverage 标明总消息数和节选数量，节选不是完整记录，不能把缺失内容当成未发生。普通寒暄不建议。输出 {needed:boolean,reason:string,keywords:string[]}，不需要时说明原因，需要时提取用于历史事件检索的关键词。',
   advice:
     '结合检索到的历史记忆、用户与对象档案、摘要、原始消息和量化变化，输出 {analysis:string,advice:string}。分析需说明证据、不确定性和历史关联。建议应具体、尊重双方边界，不生成可直接代发的回复选项。',

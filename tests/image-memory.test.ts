@@ -11,6 +11,7 @@ import { Store } from '../server/store.js';
 import { fixture, deferred } from './helpers.js';
 
 const summary = {
+  adviceSignal: { worthChecking: false, reason: '普通讨论，暂不值得进一步判断' },
   compressedPreviousSummary: '',
   summary: '双方确认周六见面',
   relevant: true,

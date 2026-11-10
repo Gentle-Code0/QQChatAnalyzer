@@ -7,6 +7,7 @@ import { fixture, deferred } from './helpers.js';
 import { buildContextContent } from '../server/ai-context.js';
 
 const light = {
+  adviceSignal: { worthChecking: false, reason: '普通讨论，暂不值得进一步判断' },
   compressedPreviousSummary: '',
   summary: '讨论周六见面；时间尚未回答。',
   relevant: true,
@@ -122,12 +123,15 @@ test('自定义累计阈值达到 3 条时触发建议必要性判断', { timeou
     engine.notify(data.conversation.id);
     context.mock.timers.tick(3000);
     await summarized.promise;
-    assert.equal(data.store.decisions(data.conversation.id).length, 0);
+    assert.equal(data.store.decisions(data.conversation.id).length, 1);
+    assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '摘要建议预筛');
+    assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+    assert.equal(ai.calls.includes(prompts.gate), false);
     data.store.addMessage(data.message('3'));
     engine.notify(data.conversation.id);
     context.mock.timers.tick(3000);
     await completed.promise;
-    assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '消息数量阈值');
+    assert.equal(data.store.decisions(data.conversation.id).at(-1)?.trigger, '消息数量阈值');
   } finally {
     await engine.stop();
     context.mock.timers.reset();
@@ -260,7 +264,11 @@ test(
     const summarized = watcher(
       () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
     );
-    const completed = watcher(() => data.store.decisions(data.conversation.id).length > 0);
+    const completed = watcher(() =>
+      data.store
+        .decisions(data.conversation.id)
+        .some((decision) => decision.trigger === '对话静默'),
+    );
     const ai = new FakeAi((instruction) =>
       instruction === prompts.summary
         ? light
@@ -277,10 +285,13 @@ test(
       engine.notify(data.conversation.id);
       context.mock.timers.tick(data.store.settings.mergeWindowSeconds * 1000);
       await summarized.promise;
-      assert.equal(data.store.decisions(data.conversation.id).length, 0);
+      assert.equal(data.store.decisions(data.conversation.id).length, 1);
+      assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '摘要建议预筛');
+      assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+      assert.equal(ai.calls.includes(prompts.gate), false);
       context.mock.timers.tick(data.store.settings.idleSeconds * 1000);
       await completed.promise;
-      assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '对话静默');
+      assert.equal(data.store.decisions(data.conversation.id).at(-1)?.trigger, '对话静默');
     } finally {
       await engine.stop();
       context.mock.timers.reset();
@@ -804,7 +815,11 @@ test(
     const summarized = watcher(
       () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
     );
-    const decided = watcher(() => data.store.decisions(data.conversation.id).length > 0);
+    const decided = watcher(() =>
+      data.store
+        .decisions(data.conversation.id)
+        .some((decision) => decision.trigger === '对话静默'),
+    );
     const consolidated = watcher(
       () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
     );
@@ -870,7 +885,13 @@ test(
       context.mock.timers.tick(0);
       await summarized.promise;
       assert.deepEqual(ai.calls, [prompts.summary]);
-      assert.equal(data.store.decisions(data.conversation.id).length, 0);
+      assert.equal(data.store.decisions(data.conversation.id).length, 1);
+      assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '摘要建议预筛');
+      assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+      assert.equal(
+        ai.calls.some((call) => call === prompts.gate),
+        false,
+      );
       assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 0);
     } finally {
       await engine.stop();
@@ -966,7 +987,9 @@ test('静默计时到期等待在途摘要，不取消或重复摘要请求', { 
   const data = fixture();
   const response = deferred<unknown>();
   const started = deferred<AbortSignal>();
-  const decided = watcher(() => data.store.decisions(data.conversation.id).length > 0);
+  const decided = watcher(() =>
+    data.store.decisions(data.conversation.id).some((decision) => decision.trigger === '对话静默'),
+  );
   const ai = new FakeAi((instruction, signal) => {
     if (instruction === prompts.summary) {
       started.resolve(signal);
@@ -1337,3 +1360,322 @@ test(
     }
   },
 );
+
+for (const needed of [true, false]) {
+  test(
+    `摘要肯定信号提前进入建议判断，判断 needed=${needed} 时按需生成`,
+    { timeout: 5000 },
+    async (context) => {
+      context.mock.timers.enable({ apis: ['setTimeout'] });
+      const data = fixture();
+      data.store.settings = { ...data.store.settings, summaryMessageThreshold: 2 };
+      const done = deferred<void>();
+      const ai = new FakeAi((instruction) => {
+        if (instruction === prompts.summary)
+          return {
+            ...light,
+            adviceSignal: { worthChecking: true, reason: '存在待确认的见面安排' },
+          };
+        if (instruction === prompts.gate)
+          return { needed, reason: '进一步判断的依据', keywords: ['见面'] };
+        assert.equal(instruction, prompts.advice);
+        return { analysis: '约定需要确认', advice: '确认双方时间' };
+      });
+      const engine = new AnalysisEngine(data.store, ai, () => {
+        if (engine.activity(data.conversation.id).at(-1)?.status === 'completed') done.resolve();
+      });
+      try {
+        data.store.addMessage(data.message('1'));
+        data.store.addMessage(data.message('2'));
+        engine.notify(data.conversation.id);
+        context.mock.timers.tick(0);
+        await done.promise;
+        assert.deepEqual(
+          ai.calls,
+          needed
+            ? [prompts.summary, prompts.gate, prompts.advice]
+            : [prompts.summary, prompts.gate],
+        );
+        assert.equal(data.store.decisions(data.conversation.id)[0]?.trigger, '摘要建议预筛');
+        assert.equal(data.store.decisions(data.conversation.id)[0]?.needed, needed);
+        assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 2);
+        assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 0);
+      } finally {
+        await engine.stop();
+        context.mock.timers.reset();
+        data.cleanup();
+      }
+    },
+  );
+}
+
+for (const trigger of ['manual', 'idle', 'threshold', 'significant'] as const) {
+  test(`摘要否定信号不阻止 ${trigger} 独立建议判断`, { timeout: 5000 }, async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    data.store.settings = {
+      ...data.store.settings,
+      summaryMessageThreshold: 2,
+      messageThreshold: trigger === 'threshold' ? 2 : 30,
+    };
+    const done = watcher(() =>
+      data.store
+        .decisions(data.conversation.id)
+        .some((decision) => decision.trigger !== '摘要建议预筛'),
+    );
+    const ai = new FakeAi((instruction) =>
+      instruction === prompts.summary
+        ? { ...light, significant: trigger === 'significant' }
+        : instruction === prompts.gate
+          ? { needed: false, reason: '独立检查确认无需介入', keywords: [] }
+          : consolidation,
+    );
+    const engine = new AnalysisEngine(data.store, ai, done.changed);
+    try {
+      data.store.addMessage(data.message('1'));
+      if (trigger === 'threshold' || trigger === 'significant')
+        data.store.addMessage(data.message('2'));
+      if (trigger === 'manual') engine.flush(data.conversation.id);
+      else {
+        engine.notify(data.conversation.id);
+        context.mock.timers.tick(trigger === 'idle' ? 120000 : 0);
+      }
+      await done.promise;
+      assert.equal(ai.calls.filter((call) => call === prompts.gate).length, 1);
+      const decision = data.store.decisions(data.conversation.id).at(-1)!;
+      assert.equal(decision.reason, '独立检查确认无需介入');
+      assert.equal(
+        decision.trigger,
+        {
+          manual: '手动检查',
+          idle: '对话静默',
+          threshold: '消息数量阈值',
+          significant: '明显态度/情绪变化',
+        }[trigger],
+      );
+      assert.equal(
+        data.store.conversation(data.conversation.id)!.lastDecisionSequence,
+        trigger === 'threshold' || trigger === 'significant' ? 2 : 1,
+      );
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  });
+}
+
+for (const kind of ['history', 'unrelated-group'] as const) {
+  test(`摘要肯定信号不绕过 ${kind} 的建议限制`, { timeout: 5000 }, async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    data.store.settings = { ...data.store.settings, summaryMessageThreshold: 2 };
+    if (kind === 'unrelated-group')
+      data.store.saveConversation({ ...data.conversation, kind: 'group' });
+    const done = deferred<void>();
+    const ai = new FakeAi((instruction) => {
+      assert.equal(instruction, prompts.summary);
+      return {
+        ...light,
+        relevant: kind !== 'unrelated-group',
+        adviceSignal: { worthChecking: true, reason: '应当被历史或相关性规则拦截' },
+      };
+    });
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      if (engine.activity(data.conversation.id).at(-1)?.status === 'completed') done.resolve();
+    });
+    try {
+      for (const id of ['1', '2'])
+        data.store.addMessage({
+          ...data.message(id),
+          source: kind === 'history' ? 'history' : 'live',
+        });
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(0);
+      await done.promise;
+      assert.deepEqual(ai.calls, [prompts.summary]);
+      assert.equal(data.store.decisions(data.conversation.id).length, 0);
+      assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  });
+}
+
+test('多页摘要中后续否定信号不会覆盖前页肯定信号', { timeout: 5000 }, async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const data = fixture();
+  data.store.settings = { ...data.store.settings, messageThreshold: 200 };
+  const done = deferred<void>();
+  let summaries = 0;
+  const ai = new FakeAi((instruction) => {
+    if (instruction === prompts.summary)
+      return {
+        ...light,
+        adviceSignal: {
+          worthChecking: ++summaries === 1,
+          reason: summaries === 1 ? '第一批存在待处理约定' : '最后一批只是闲聊',
+        },
+      };
+    assert.equal(instruction, prompts.gate);
+    return { needed: false, reason: '综合后无需建议', keywords: [] };
+  });
+  const engine = new AnalysisEngine(data.store, ai, () => {
+    if (engine.activity(data.conversation.id).at(-1)?.status === 'completed') done.resolve();
+  });
+  try {
+    for (let index = 1; index <= 61; index++) data.store.addMessage(data.message(String(index)));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(0);
+    await done.promise;
+    assert.deepEqual(ai.calls, [prompts.summary, prompts.summary, prompts.gate]);
+    assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 61);
+    assert.ok(
+      engine
+        .activity(data.conversation.id)
+        .at(-1)
+        ?.steps.some(
+          (step) => step.label === '摘要建议预筛' && step.detail === '第一批存在待处理约定',
+        ),
+    );
+  } finally {
+    await engine.stop();
+    context.mock.timers.reset();
+    data.cleanup();
+  }
+});
+
+test('新消息取消旧摘要，迟到的肯定信号不会触发建议判断', { timeout: 5000 }, async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const data = fixture();
+  data.store.settings = { ...data.store.settings, summaryMessageThreshold: 2 };
+  const started = deferred<AbortSignal>(),
+    stale = deferred<unknown>(),
+    done = deferred<void>();
+  let summaries = 0;
+  const ai = new FakeAi((instruction, signal) => {
+    assert.equal(instruction, prompts.summary);
+    if (++summaries === 1) {
+      started.resolve(signal);
+      return stale.promise;
+    }
+    return light;
+  });
+  const engine = new AnalysisEngine(data.store, ai, () => {
+    if (engine.activity(data.conversation.id).at(-1)?.status === 'completed') done.resolve();
+  });
+  try {
+    data.store.addMessage(data.message('1'));
+    data.store.addMessage(data.message('2'));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(0);
+    const oldSignal = await started.promise;
+    data.store.addMessage(data.message('3'));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(0);
+    await done.promise;
+    assert.equal(oldSignal.aborted, true);
+    stale.resolve({ ...light, adviceSignal: { worthChecking: true, reason: '过期信号' } });
+    await engine.stop();
+    assert.equal(ai.calls.includes(prompts.gate), false);
+    assert.equal(data.store.decisions(data.conversation.id).length, 1);
+    assert.equal(data.store.decisions(data.conversation.id)[0]?.reason, light.adviceSignal.reason);
+    assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+  } finally {
+    stale.resolve(light);
+    await engine.stop();
+    context.mock.timers.reset();
+    data.cleanup();
+  }
+});
+
+test(
+  '摘要缺失预筛字段不推进摘要进度；建议判断失败后可不重复摘要地重试',
+  { timeout: 5000 },
+  async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    data.store.settings = { ...data.store.settings, summaryMessageThreshold: 2 };
+    let phase: 'missing' | 'gate-failure' | 'success' = 'missing';
+    let failed = deferred<void>();
+    const done = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+    );
+    const ai = new FakeAi((instruction) => {
+      if (instruction === prompts.summary) {
+        if (phase === 'missing') {
+          const { adviceSignal: _signal, ...legacy } = light;
+          return legacy;
+        }
+        return { ...light, adviceSignal: { worthChecking: true, reason: '需要进一步判断' } };
+      }
+      if (instruction === prompts.gate) {
+        if (phase === 'gate-failure')
+          throw new AiCallError('HTTP 响应', 'AI 服务返回 HTTP 429，请检查额度或请求频率。');
+        return { needed: false, reason: '重试后无需建议', keywords: [] };
+      }
+      return consolidation;
+    });
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      if (engine.activity(data.conversation.id).at(-1)?.status === 'failed') failed.resolve();
+      done.changed();
+    });
+    try {
+      data.store.addMessage(data.message('1'));
+      data.store.addMessage(data.message('2'));
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(0);
+      await failed.promise;
+      assert.equal(data.store.conversation(data.conversation.id)!.processedSequence, 0);
+      assert.equal(data.store.observations(data.conversation.id).length, 0);
+      failed = deferred<void>();
+      phase = 'gate-failure';
+      engine.flush(data.conversation.id);
+      await failed.promise;
+      assert.equal(data.store.conversation(data.conversation.id)!.processedSequence, 2);
+      assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+      phase = 'success';
+      engine.flush(data.conversation.id);
+      await done.promise;
+      assert.equal(ai.calls.filter((call) => call === prompts.summary).length, 2);
+      assert.equal(ai.calls.filter((call) => call === prompts.gate).length, 2);
+      assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 2);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  },
+);
+
+test('摘要否定信号仅结束建议入口，不停止独立到期的记忆归纳', { timeout: 5000 }, async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const data = fixture();
+  data.store.settings = {
+    ...data.store.settings,
+    summaryMessageThreshold: 2,
+    consolidationMessageThreshold: 2,
+  };
+  const done = watcher(
+    () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+  );
+  const ai = new FakeAi((instruction) => (instruction === prompts.summary ? light : consolidation));
+  const engine = new AnalysisEngine(data.store, ai, done.changed);
+  try {
+    data.store.addMessage(data.message('1'));
+    data.store.addMessage(data.message('2'));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(0);
+    await done.promise;
+    assert.deepEqual(ai.calls, [prompts.summary, prompts.consolidate]);
+    assert.equal(data.store.decisions(data.conversation.id)[0]?.reason, light.adviceSignal.reason);
+    assert.equal(data.store.conversation(data.conversation.id)!.lastDecisionSequence, 0);
+    assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 2);
+  } finally {
+    await engine.stop();
+    context.mock.timers.reset();
+    data.cleanup();
+  }
+});

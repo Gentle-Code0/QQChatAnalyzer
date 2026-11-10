@@ -21,6 +21,7 @@ import {
   adviceResultSchema,
   consolidationSchema,
   type AiClient,
+  type SummaryAdviceSignal,
 } from './ai.js';
 import type { ProgressEvent } from './progress.js';
 import type {
@@ -344,6 +345,7 @@ export class AnalysisEngine {
     controller: AbortController,
   ): Promise<void> {
     let significant = false;
+    let summarySignal: SummaryAdviceSignal | undefined;
     const initial = this.active(id)!;
     const settings = this.store.settings;
     const manual = initialTrigger === '手动检查';
@@ -414,6 +416,13 @@ export class AnalysisEngine {
       if (!this.valid(id, controller)) return;
       const relevant = current.conversation.kind === 'private' || result.relevant;
       significant ||= result.significant && relevant;
+      // Any positive live batch may request a check; a later negative batch cannot veto it.
+      if (
+        relevant &&
+        pending.some((message) => message.source === 'live') &&
+        !summarySignal?.worthChecking
+      )
+        summarySignal = result.adviceSignal;
       const observationSaved = this.beginStep(id, 'storage', '保存态度与情绪分析');
       this.store.saveObservation({
         id: randomUUID(),
@@ -442,7 +451,7 @@ export class AnalysisEngine {
       summarySaved();
     }
     if (!this.valid(id, controller)) return;
-    await this.decide(id, initialTrigger, significant, controller);
+    await this.decide(id, initialTrigger, significant, controller, summarySignal);
     if (!this.valid(id, controller)) return;
     if (consolidationDue) await this.consolidatePending(id, controller);
     else this.skip(id, '画像与记忆归纳', '尚未达到归纳累计条数或静默时间');
@@ -452,6 +461,7 @@ export class AnalysisEngine {
     trigger: string,
     significant: boolean,
     controller: AbortController,
+    summarySignal?: SummaryAdviceSignal,
   ): Promise<void> {
     let relevant = this.store.observations(id).at(-1)?.relevant ?? false;
     const { conversation, contact } = this.active(id)!;
@@ -468,15 +478,27 @@ export class AnalysisEngine {
     }
     const liveCount = recent.filter((message) => message.source === 'live').length;
     const threshold = liveCount >= this.store.settings.messageThreshold;
-    const due = trigger === '对话静默' || trigger === '手动检查' || threshold || significant;
+    const due =
+      trigger === '对话静默' ||
+      trigger === '手动检查' ||
+      threshold ||
+      significant ||
+      summarySignal?.worthChecking;
     if (!due || liveCount === 0) {
-      this.skip(
-        id,
-        '建议判断',
-        liveCount === 0 ? '历史消息仅更新摘要与记忆，不生成建议' : '尚未达到建议判断的触发条件',
-      );
+      if (liveCount > 0 && summarySignal && !summarySignal.worthChecking) {
+        this.skip(id, '建议判断', '摘要建议预筛认为暂不值得进一步判断，独立触发规则继续有效');
+        this.recordDecision(id, false, summarySignal.reason, '', '摘要建议预筛', [], false);
+      } else {
+        this.skip(
+          id,
+          '建议判断',
+          liveCount === 0 ? '历史消息仅更新摘要与记忆，不生成建议' : '尚未达到建议判断的触发条件',
+        );
+      }
       return;
     }
+    if (summarySignal?.worthChecking && trigger !== '对话静默' && trigger !== '手动检查')
+      trigger = '摘要建议预筛';
     if (threshold) trigger = '消息数量阈值';
     if (significant) trigger = '明显态度/情绪变化';
     if (!relevant) {
@@ -490,6 +512,14 @@ export class AnalysisEngine {
         [],
       );
       return;
+    }
+    if (summarySignal) {
+      const screened = this.beginStep(id, 'schedule', '摘要建议预筛');
+      screened(
+        summarySignal.worthChecking
+          ? summarySignal.reason
+          : `摘要预筛为否，但独立触发仍需判断：${summarySignal.reason}`,
+      );
     }
     const observations = this.store.observations(id);
     const evidence = selectDecisionEvidence(recent, observations, [
@@ -589,6 +619,7 @@ export class AnalysisEngine {
     advice: string,
     trigger: string,
     memoryIds: string[],
+    advanceDecisionProgress = true,
   ): void {
     const conversation = this.store.conversation(id)!;
     const decisionSaved = this.beginStep(id, 'storage', '保存建议判断');
@@ -604,7 +635,10 @@ export class AnalysisEngine {
     });
     this.store.saveConversation({
       ...conversation,
-      lastDecisionSequence: conversation.processedSequence,
+      // A summary-only rejection must not consume the independent decision threshold.
+      lastDecisionSequence: advanceDecisionProgress
+        ? conversation.processedSequence
+        : conversation.lastDecisionSequence,
       status: '观察中',
       error: '',
     });
