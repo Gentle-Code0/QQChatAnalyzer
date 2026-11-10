@@ -49,6 +49,18 @@ export const contactSchema = contactInputSchema.extend({
   historyCursor: z.number().int().default(0),
   historyDone: z.boolean().default(false),
 });
+export const historySyncSchema = z.object({
+  conversationId: z.string(),
+  accountId: z.string(),
+  initialCursor: z.number().int().default(0),
+  initialDone: z.boolean().default(false),
+  recoveryPending: z.boolean().default(false),
+  recoveryCursor: z.number().int().default(0),
+  recoveryVisited: z.array(z.number().int()).max(1000).default([]),
+  boundaryId: z.string().default(''),
+});
+export type HistorySync = z.infer<typeof historySyncSchema>;
+
 export const conversationSchema = z.object({
   id: z.string(),
   contactId: z.string(),
@@ -56,6 +68,8 @@ export const conversationSchema = z.object({
   peerId: z.string(),
   paused: z.boolean().default(false),
   summary: z.string().default(''),
+  historyStatus: z.string().default('待导入'),
+  historyAnalysisSequence: z.number().int().default(0),
   processedSequence: z.number().default(0),
   lastDecisionSequence: z.number().default(0),
   consolidatedSequence: z.number().default(0),

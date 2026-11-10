@@ -226,6 +226,18 @@ export class AnalysisEngine {
     );
   }
 
+  historyImported(id: string, schedule = true): void {
+    const conversation = this.store.conversation(id);
+    if (!conversation) return;
+    const sequence = this.store.messages(id, 0, 1).at(-1)?.sequence ?? 0;
+    if (sequence <= Math.min(conversation.processedSequence, conversation.consolidatedSequence))
+      return;
+    this.store.saveConversation({
+      ...conversation,
+      historyAnalysisSequence: Math.max(conversation.historyAnalysisSequence, sequence),
+    });
+    if (schedule) this.notify(id, false);
+  }
   flush(id: string): void {
     this.cancel(id, '用户发起重新检查');
     if (this.active(id)) this.launch(id, '手动检查');
@@ -349,17 +361,22 @@ export class AnalysisEngine {
     const initial = this.active(id)!;
     const settings = this.store.settings;
     const manual = initialTrigger === '手动检查';
+    const historyDue =
+      initial.conversation.historyAnalysisSequence >
+      Math.min(initial.conversation.processedSequence, initial.conversation.consolidatedSequence);
     const decisionDue =
       manual ||
       initialTrigger === '对话静默' ||
       this.store.pendingMessageCount(id, initial.conversation.lastDecisionSequence, true) >=
         settings.messageThreshold;
     const consolidationDue =
+      historyDue ||
       manual ||
       initialTrigger === '归纳静默' ||
       this.store.pendingMessageCount(id, initial.conversation.consolidatedSequence) >=
         settings.consolidationMessageThreshold;
     const summaryDue =
+      historyDue ||
       decisionDue ||
       consolidationDue ||
       initialTrigger === '摘要静默' ||

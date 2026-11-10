@@ -37,6 +37,7 @@ export interface BridgeOptions {
   selfQq: string;
   onMessage: (message: QqMessage) => void;
   onConnected: () => Promise<void>;
+  onDisconnected?: () => void;
   onStatus: () => void;
 }
 
@@ -107,6 +108,14 @@ export function normalizeMessage(
   const event = result.data;
   if (event.self_id !== undefined && event.self_id !== selfQq) return undefined;
   if (event.post_type && !['message', 'message_sent'].includes(event.post_type)) return undefined;
+  const explicitPrivatePeer = event.user_id === selfQq ? event.target_id : event.user_id;
+  if (
+    event.message_type === 'private' &&
+    historyPeer &&
+    explicitPrivatePeer &&
+    explicitPrivatePeer !== historyPeer
+  )
+    return undefined;
   const peerId =
     event.message_type === 'group'
       ? event.group_id
@@ -170,6 +179,8 @@ export class QqBridge {
   private readonly pending = new Map<string, PendingRequest>();
   private stopped = true;
   private retryDelay = 1000;
+  private epoch = 0;
+  private validating: Promise<void> | undefined;
   constructor(private readonly options: BridgeOptions) {}
 
   start(): void {
@@ -188,14 +199,9 @@ export class QqBridge {
       handshakeTimeout: 10000,
     });
     this.socket = socket;
-    socket.on('open', () => {
-      void this.handshake().catch(() => {
-        this.status = '账号校验失败，请检查自身 QQ 号码和桥接配置';
-        this.options.onStatus();
-        socket.close();
-      });
-    });
+    socket.on('open', () => this.validateConnection(socket));
     socket.on('message', (data) => {
+      if (this.socket !== socket || this.stopped) return;
       try {
         const raw: unknown = JSON.parse(data.toString());
         const envelope = z
@@ -216,6 +222,36 @@ export class QqBridge {
             pending.reject(new Error(`QQ 只读接口失败 (${envelope.data.retcode ?? '未知返回码'})`));
           return;
         }
+        const notice = z
+          .object({
+            self_id: identifierSchema,
+            post_type: z.string(),
+            notice_type: z.string().optional(),
+            sub_type: z.string().optional(),
+            status: z.object({ online: z.boolean().optional() }).optional(),
+          })
+          .safeParse(raw);
+        if (notice.success && notice.data.self_id === this.options.selfQq) {
+          const value = notice.data;
+          const accountStatus = value.post_type === 'notice' && value.notice_type === 'bot_status';
+          const heartbeat = value.post_type === 'meta_event';
+          if (
+            (accountStatus && value.sub_type === 'offline') ||
+            (value.post_type === 'notice' && value.notice_type === 'bot_offline') ||
+            (heartbeat && value.status?.online === false)
+          ) {
+            this.disconnected('QQ 账号离线，等待恢复');
+            return;
+          }
+          if (
+            !this.connected &&
+            ((accountStatus && value.sub_type === 'online') ||
+              (heartbeat && value.status?.online === true))
+          ) {
+            this.validateConnection(socket);
+            return;
+          }
+        }
         if (!this.connected) return;
         const message = normalizeMessage(raw, this.options.selfQq);
         if (message) this.options.onMessage(message);
@@ -225,16 +261,13 @@ export class QqBridge {
       }
     });
     socket.on('error', () => {
+      if (this.socket !== socket || this.stopped) return;
       this.status = '连接错误，请检查地址、Token 与网络';
       this.options.onStatus();
     });
     socket.on('close', () => {
-      this.connected = false;
-      for (const pending of this.pending.values()) {
-        pending.cleanup();
-        pending.reject(new Error('QQ 连接已断开'));
-      }
-      this.pending.clear();
+      if (this.socket !== socket) return;
+      this.disconnected('连接断开，等待重连');
       if (this.stopped) return;
       this.status = '连接断开，等待重连';
       this.options.onStatus();
@@ -242,10 +275,46 @@ export class QqBridge {
       this.retryDelay = Math.min(this.retryDelay * 2, 30000);
     });
   }
-  private async handshake(): Promise<void> {
+  private disconnected(status: string): void {
+    const notify = this.connected || this.validating !== undefined;
+    this.epoch++;
+    this.validating = undefined;
+    this.connected = false;
+    this.status = status;
+    for (const pending of this.pending.values()) {
+      pending.cleanup();
+      pending.reject(new Error(this.stopped ? '桥接已停止' : 'QQ 连接或账号已离线'));
+    }
+    this.pending.clear();
+    if (notify) this.options.onDisconnected?.();
+    this.options.onStatus();
+  }
+  private validateConnection(socket: WebSocket): void {
+    if (this.stopped || this.socket !== socket || this.validating || this.connected) return;
+    const epoch = ++this.epoch;
+    const task = this.handshake(socket, epoch)
+      .catch(() => {
+        if (this.stopped || this.socket !== socket || this.epoch !== epoch) return;
+        this.status = '账号校验失败，请检查自身 QQ 号码和桥接配置';
+        this.options.onStatus();
+        socket.close();
+      })
+      .finally(() => {
+        if (this.validating === task) this.validating = undefined;
+      });
+    this.validating = task;
+  }
+  private async handshake(socket: WebSocket, epoch: number): Promise<void> {
     const login = z
       .object({ user_id: identifierSchema })
       .parse(await this.request('get_login_info', {}));
+    if (
+      this.stopped ||
+      this.socket !== socket ||
+      this.epoch !== epoch ||
+      socket.readyState !== WebSocket.OPEN
+    )
+      return;
     if (login.user_id !== this.options.selfQq) throw new Error('QQ 账号不匹配');
     this.connected = true;
     this.status = 'QQ 已连接 · 只读';
@@ -304,18 +373,46 @@ export class QqBridge {
   async history(
     peerId: string,
     cursor = 0,
+    kind: 'private' | 'group' = 'private',
+    signal?: AbortSignal,
   ): Promise<{ messages: QqMessage[]; cursor: number; rawCount: number }> {
     const data = z.object({ messages: z.array(z.unknown()).max(500) }).parse(
-      await this.request('get_friend_msg_history', {
-        user_id: peerId,
-        count: 100,
-        message_id: cursor,
-        reverse_order: true,
-      }),
+      await this.request(
+        kind === 'private' ? 'get_friend_msg_history' : 'get_group_msg_history',
+        {
+          ...(kind === 'private' ? { user_id: peerId } : { group_id: peerId }),
+          count: 100,
+          message_id: cursor,
+          reverse_order: true,
+        },
+        signal,
+      ),
     );
+    for (const raw of data.messages) {
+      const parsed = eventSchema.safeParse(raw);
+      if (!parsed.success) continue;
+      const event = parsed.data;
+      const explicitPeer =
+        kind === 'group'
+          ? event.group_id
+          : event.user_id === this.options.selfQq
+            ? event.target_id
+            : event.user_id;
+      if (
+        (event.self_id !== undefined && event.self_id !== this.options.selfQq) ||
+        event.message_type !== kind ||
+        (explicitPeer !== undefined && explicitPeer !== peerId)
+      )
+        throw new Error('历史消息的账号或会话身份不匹配，未接收该页');
+    }
     const messages = data.messages
-      .map((raw) => normalizeMessage(raw, this.options.selfQq, peerId))
-      .filter((item): item is QqMessage => item !== undefined)
+      .map((raw) =>
+        normalizeMessage(raw, this.options.selfQq, kind === 'private' ? peerId : undefined),
+      )
+      .filter(
+        (item): item is QqMessage =>
+          item !== undefined && item.kind === kind && item.peerId === peerId,
+      )
       .sort((left, right) => left.time - right.time);
     // Provider ordering is not assumed: use the chronologically oldest raw event as the page anchor.
     const anchors = data.messages
@@ -327,14 +424,9 @@ export class QqBridge {
   }
   stop(): void {
     this.stopped = true;
-    this.connected = false;
+    this.disconnected('已断开');
     this.status = '已断开';
     clearTimeout(this.reconnectTimer);
-    for (const pending of this.pending.values()) {
-      pending.cleanup();
-      pending.reject(new Error('桥接已停止'));
-    }
-    this.pending.clear();
     this.socket?.terminate();
     this.socket = undefined;
   }

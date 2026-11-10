@@ -4,6 +4,7 @@ import { Store } from './store.js';
 import { QqBridge, type QqMessage } from './bridge.js';
 import { CompatibleAi, AiCallError } from './ai.js';
 import { ImageAnalysisService } from './image-analysis.js';
+import { HistorySynchronizer } from './history-sync.js';
 import { AnalysisEngine } from './engine.js';
 import {
   aiTestInputSchema,
@@ -18,7 +19,7 @@ export class Application {
   readonly engine: AnalysisEngine;
   readonly images: ImageAnalysisService;
   bridge: QqBridge | undefined;
-  private readonly imports = new Map<string, Promise<void>>();
+  readonly history: HistorySynchronizer;
   private closed = false;
   private readonly aiTests = new Map<AbortController, Promise<AiTestResult>>();
   constructor(readonly store: Store) {
@@ -40,6 +41,18 @@ export class Application {
       cleanupFailed: () => console.error('图片分析缓存定时清理失败'),
     });
     this.engine = new AnalysisEngine(store, ai, () => {}, this.images);
+    this.history = new HistorySynchronizer({
+      store,
+      bridge: () => this.bridge,
+      ensureConversations: (id) => {
+        const contact = store.contact(id);
+        if (contact) this.ensureConversations(contact);
+      },
+      receive: (message) => this.receive(message, 'history'),
+      onStarting: (id) => this.engine.cancel(id, '历史补读开始，等待本批消息入库'),
+      onImported: (id) => this.engine.historyImported(id, false),
+      onSettled: (id) => this.engine.historyImported(id, Boolean(store.secret('apiKey'))),
+    });
   }
 
   testAi(input: unknown, signal: AbortSignal): Promise<AiTestResult> {
@@ -118,9 +131,8 @@ export class Application {
       selfQq: settings.selfQq,
       onStatus: () => {},
       onMessage: (message) => this.receive(message, 'live'),
-      onConnected: async () => {
-        for (const contact of this.store.contacts()) void this.importHistory(contact.id);
-      },
+      onConnected: async () => this.history.connected(),
+      onDisconnected: () => this.history.disconnected(),
     });
     this.bridge.start();
   }
@@ -136,7 +148,8 @@ export class Application {
         );
     }
   }
-  receive(message: QqMessage, source: 'live' | 'history'): void {
+  receive(message: QqMessage, source: 'live' | 'history'): string[] {
+    const affected: string[] = [];
     for (const contact of this.store.contacts()) {
       if (
         message.kind === 'private'
@@ -155,11 +168,12 @@ export class Application {
         sequence: 0,
       });
       if (!added) continue;
+      affected.push(id);
       this.store.saveConversation({
         ...conversation,
         lastMessageAt: Math.max(conversation.lastMessageAt, message.time),
       });
-      if (source === 'live') {
+      if (source === 'live' && !this.history.isSyncing(id)) {
         if (this.store.secret('apiKey')) this.engine.notify(id);
         else
           this.store.saveConversation({
@@ -168,87 +182,21 @@ export class Application {
           });
       }
     }
+    return affected;
   }
   importHistory(contactId: string): Promise<void> {
-    const running = this.imports.get(contactId);
-    if (running) return running;
-    const task = this.runImport(contactId)
-      .catch(() => {
-        const contact = this.store.contact(contactId);
-        if (contact)
-          this.store.saveContact({
-            ...contact,
-            historyStatus: '历史读取失败；已读取部分保留，可重试',
-          });
-      })
-      .finally(() => this.imports.delete(contactId));
-    this.imports.set(contactId, task);
-    return task;
-  }
-  private async runImport(contactId: string): Promise<void> {
-    let contact = this.store.contact(contactId);
-    const bridge = this.bridge;
-    if (!contact || this.closed) return;
-    if (!bridge?.connected) {
-      this.store.saveContact({ ...contact, historyStatus: 'QQ 未连接，连接后自动读取历史' });
-      return;
-    }
-    const conversationId = `${contact.id}:private:${contact.qq}`;
-    // First import resumes the older-page checkpoint; completed imports refresh the recent gap.
-    let cursor = contact.historyDone ? 0 : contact.historyCursor;
-    let imported = 0;
-    let exhausted = false;
-    const pages = this.store.settings.historyPages;
-    const refreshing = contact.historyDone;
-    this.store.saveContact({ ...contact, historyStatus: '正在读取历史…' });
-    for (
-      let page = 0;
-      page < pages && !this.closed && this.bridge === bridge && bridge.connected;
-      page++
-    ) {
-      const batch = await bridge.history(contact.qq, cursor);
-      const before = this.store.messageCount(conversationId);
-      for (const message of batch.messages) this.receive(message, 'history');
-      imported += batch.messages.length;
-      contact = this.store.contact(contactId)!;
-      const after = this.store.messageCount(conversationId);
-      const reachedKnownHistory = refreshing && after - before < batch.messages.length;
-      exhausted = batch.rawCount === 0 || batch.cursor === cursor || reachedKnownHistory;
-      cursor = batch.cursor;
-      this.store.saveContact({
-        ...contact,
-        historyCount: after,
-        historyCursor: cursor,
-        historyStatus: `已读取 ${imported} 条（读取范围受 QQ 接口限制）`,
-      });
-      if (exhausted) break;
-    }
-    contact = this.store.contact(contactId)!;
-    if (this.closed || this.bridge !== bridge) return;
-    this.store.saveContact({
-      ...contact,
-      historyDone: exhausted,
-      historyStatus: !bridge.connected
-        ? '连接中断；已读取部分保留，请重试'
-        : exhausted
-          ? '本次可读范围已读完（不保证完整历史）'
-          : '达到本次分页上限，可能仍有缺口；点击继续读取',
-    });
-    if (this.store.secret('apiKey')) this.engine.notify(conversationId, false);
+    return this.history.importContact(contactId);
   }
   createId(): string {
     return randomUUID();
   }
   async stop(): Promise<void> {
     this.closed = true;
+    const historyStopped = this.history.stop();
     this.images.stop();
     this.bridge?.stop();
     for (const controller of this.aiTests.keys()) controller.abort();
-    await Promise.allSettled([
-      ...this.aiTests.values(),
-      ...this.imports.values(),
-      this.engine.stop(),
-    ]);
+    await Promise.allSettled([...this.aiTests.values(), historyStopped, this.engine.stop()]);
     this.store.close();
   }
 }

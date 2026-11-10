@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { z } from 'zod';
 import {
+  historySyncSchema,
+  type HistorySync,
   contactSchema,
   conversationSchema,
   messageSchema,
@@ -79,6 +81,12 @@ export class Store {
   }
   set settings(value) {
     this.write('config', 'settings', settingsSchema.parse(value));
+  }
+  historySync(conversationId: string): HistorySync | undefined {
+    return this.read('history-sync', conversationId, historySyncSchema);
+  }
+  saveHistorySync(value: HistorySync): void {
+    this.write('history-sync', value.conversationId, historySyncSchema.parse(value));
   }
   contacts(): Contact[] {
     return this.list('contact', contactSchema);

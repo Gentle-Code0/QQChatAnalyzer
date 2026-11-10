@@ -167,7 +167,7 @@ export function Workspace({
             {tab === '历史记忆' && (
               <div className="record-list">
                 <div className="notice">
-                  {contact.historyStatus}
+                  {conversation?.historyStatus || contact.historyStatus}
                   <button onClick={() => void action(`/contacts/${contact.id}/history`)}>
                     继续读取 / 重试
                   </button>
