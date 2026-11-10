@@ -1,3 +1,4 @@
+import { ImageAnalysisCache } from './image-cache.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,6 +24,7 @@ import {
 /** Single process owns SQLite and the encryption key; WAL makes backups/readers practical. */
 export class Store {
   private readonly database: DatabaseSync;
+  readonly imageCache: ImageAnalysisCache;
   private readonly encryptionKey: Buffer;
   private closed = false;
 
@@ -40,6 +42,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS messages_time ON messages(conversation_id,time);
       CREATE INDEX IF NOT EXISTS records_conversation ON records(kind,json_extract(data,'$.conversationId'));
       CREATE INDEX IF NOT EXISTS records_contact ON records(kind,json_extract(data,'$.contactId'));`);
+    this.imageCache = new ImageAnalysisCache(this.database);
   }
 
   private read<T, Input>(

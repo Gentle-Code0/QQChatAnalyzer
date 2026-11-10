@@ -63,6 +63,27 @@ export const conversationSchema = z.object({
   status: z.string().default('等待消息'),
   error: z.string().default(''),
 });
+export const imageAnalysisResultSchema = z.object({
+  description: z.string().trim().min(1).max(4000),
+  limitations: z.string().max(1000),
+});
+export const imageAnalysisSchema = imageAnalysisResultSchema.extend({
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  scope: z.enum(['static', 'first-frame']),
+  model: z.string().min(1).max(100),
+});
+export type ImageAnalysis = z.infer<typeof imageAnalysisSchema>;
+export const imageEvidenceSchema = z.object({
+  messageId: z.string(),
+  conversationId: z.string(),
+  segmentIndex: z.number().int().min(0),
+  senderId: z.string(),
+  senderName: z.string(),
+  time: z.number(),
+  analysis: imageAnalysisSchema,
+});
+export type ImageEvidence = z.infer<typeof imageEvidenceSchema>;
+
 export const imageSegmentSchema = z.object({
   type: z.literal('image'),
   file: z.string().max(2000).optional(),
@@ -97,6 +118,7 @@ export const memorySchema = z.object({
   createdAt: z.number(),
   sourceIds: z.array(z.string()).max(100),
   keywords: z.array(z.string()).max(20),
+  imageEvidence: z.array(imageEvidenceSchema).max(100).optional(),
 });
 export const observationSchema = z.object({
   id: z.string(),
