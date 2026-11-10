@@ -5,8 +5,8 @@ import { createServer, type Server } from 'node:http';
 import { z } from 'zod';
 import { Application } from '../server/application.js';
 import { createApi } from '../server/http.js';
-import { AiCallError, CompatibleAi, consolidationSchema } from '../server/ai.js';
-import { aiTestResultSchema } from '../shared/schema.js';
+import { AiCallError, CompatibleAi, consolidationSchema, prompts } from '../server/ai.js';
+import { aiTestResultSchema, settingsSchema } from '../shared/schema.js';
 import { fixture, deferred } from './helpers.js';
 
 async function close(server: Server) {
@@ -346,5 +346,114 @@ test('复杂归纳输出不合格时显示字段路径，隐藏收到的字段�
     );
   } finally {
     data.cleanup();
+  }
+});
+
+for (const [label, textValue, expected] of [
+  ['缺失', undefined, '缺少必填字段'],
+  ['类型错误', { content: 'invalid-private-test-detail' }, '类型错误'],
+  ['空字符串', '', '未达到下限 1'],
+  ['超长', 'invalid-private-test-detail'.repeat(100), '超过上限 2000'],
+] as const) {
+  test(`归纳记忆 text ${label}时准确说明原因且不泄露输出`, async (context) => {
+    let requests = 0;
+    context.mock.method(globalThis, 'fetch', async () => {
+      requests++;
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  traits: {},
+                  traitSourceIds: {},
+                  memories: [
+                    {
+                      subjectId: '12345',
+                      kind: 'event',
+                      text: textValue,
+                      time: 1700000000000,
+                      sourceIds: ['test-message'],
+                      keywords: [],
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      );
+    });
+    const ai = new CompatibleAi(() => ({
+      settings: settingsSchema.parse({}),
+      apiKey: 'invalid-test-key',
+    }));
+    await assert.rejects(
+      ai.call(prompts.consolidate, {}, consolidationSchema, new AbortController().signal),
+      (error: unknown) => {
+        assert.ok(error instanceof AiCallError);
+        assert.equal(error.step, '校验模型输出');
+        assert.ok(error.message.includes(`memories.0.text（${expected}）`));
+        assert.equal(error.message.includes('invalid-private-test-detail'), false);
+        return true;
+      },
+    );
+    assert.equal(requests, 1);
+  });
+}
+
+test('归纳请求携带完整记忆契约和合法示例，接受空结果及长度上限', async (context) => {
+  const examples = [...prompts.consolidate.matchAll(/：({"traits":.*?})。/g)].map((match) =>
+    consolidationSchema.parse(JSON.parse(match[1]!)),
+  );
+  assert.equal(examples.length, 2);
+  assert.equal(examples[0]?.memories.length, 0);
+  assert.equal(examples[1]?.memories.length, 1);
+  const memory = {
+    subjectId: '12345',
+    kind: 'event',
+    text: '测'.repeat(2000),
+    time: 1700000000000,
+    sourceIds: ['test-message'],
+    keywords: [],
+  };
+  const outputs = [
+    { traits: {}, traitSourceIds: {}, memories: [] },
+    { traits: {}, traitSourceIds: {}, memories: [memory] },
+  ];
+  let requestIndex = 0;
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
+    const body = z
+      .object({
+        response_format: z.object({ type: z.literal('json_object') }),
+        messages: z.array(z.object({ role: z.string(), content: z.string() })),
+      })
+      .parse(JSON.parse(String(init?.body)));
+    const instruction = body.messages.find((message) => message.role === 'system')?.content;
+    assert.ok(instruction);
+    assert.ok(instruction.includes('text 是直接叙述事件的非空字符串，最多 2000 字符'));
+    assert.ok(instruction.includes('memories 必须是数组，最多 20 条'));
+    assert.ok(instruction.includes('不得改名为 content、summary 或 description'));
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(outputs[requestIndex++]),
+            },
+          },
+        ],
+      }),
+    );
+  });
+  const ai = new CompatibleAi(() => ({
+    settings: settingsSchema.parse({}),
+    apiKey: 'invalid-test-key',
+  }));
+  for (const output of outputs) {
+    assert.deepEqual(
+      await ai.call(prompts.consolidate, {}, consolidationSchema, new AbortController().signal),
+      output,
+    );
   }
 });

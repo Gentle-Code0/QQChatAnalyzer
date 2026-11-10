@@ -67,29 +67,40 @@ export const adviceResultSchema = z.object({
   analysis: z.string().max(6000),
   advice: z.string().max(6000),
 });
+// Keep the model's output contract and local validation limits in sync.
+const consolidationLimits = {
+  traitCharacters: 4000,
+  sourceIds: 100,
+  memories: 20,
+  textCharacters: 2000,
+  keywordCharacters: 80,
+  keywords: 20,
+};
 export const consolidationSchema = z.object({
   traitSourceIds: z.object({
-    likes: z.array(z.string()).max(100).optional(),
-    boundaries: z.array(z.string()).max(100).optional(),
-    communication: z.array(z.string()).max(100).optional(),
+    likes: z.array(z.string()).max(consolidationLimits.sourceIds).optional(),
+    boundaries: z.array(z.string()).max(consolidationLimits.sourceIds).optional(),
+    communication: z.array(z.string()).max(consolidationLimits.sourceIds).optional(),
   }),
   traits: z.object({
-    likes: z.string().max(4000).optional(),
-    boundaries: z.string().max(4000).optional(),
-    communication: z.string().max(4000).optional(),
+    likes: z.string().max(consolidationLimits.traitCharacters).optional(),
+    boundaries: z.string().max(consolidationLimits.traitCharacters).optional(),
+    communication: z.string().max(consolidationLimits.traitCharacters).optional(),
   }),
   memories: z
     .array(
       z.object({
         subjectId: z.string().min(1),
         kind: z.enum(['event', 'promise', 'relationship', 'emotion']),
-        text: z.string().min(1).max(2000),
+        text: z.string().min(1).max(consolidationLimits.textCharacters),
         time: z.number(),
-        sourceIds: z.array(z.string()).min(1).max(100),
-        keywords: z.array(z.string().max(80)).max(20),
+        sourceIds: z.array(z.string()).min(1).max(consolidationLimits.sourceIds),
+        keywords: z
+          .array(z.string().max(consolidationLimits.keywordCharacters))
+          .max(consolidationLimits.keywords),
       }),
     )
-    .max(20),
+    .max(consolidationLimits.memories),
 });
 export interface AiClient {
   call<T>(
@@ -271,23 +282,33 @@ export class CompatibleAi implements AiClient {
     }
     const result = schema.safeParse(output);
     if (!result.success) {
-      // Report schema paths only: issue messages and received values may contain private content.
+      // Report safe schema paths and local constraint labels, never provider values or messages.
       const fields = [
         ...new Set(
-          result.error.issues
-            .slice(0, 6)
-            .map(
-              (issue) =>
-                issue.path
-                  .map((part) =>
-                    typeof part === 'number'
-                      ? String(part)
-                      : /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)
-                        ? part
-                        : '字段',
-                  )
-                  .join('.') || '整体输出',
-            ),
+          result.error.issues.slice(0, 6).map((issue) => {
+            const path =
+              issue.path
+                .map((part) =>
+                  typeof part === 'number'
+                    ? String(part)
+                    : /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)
+                      ? part
+                      : '字段',
+                )
+                .join('.') || '整体输出';
+            // Use only local labels and schema bounds; never echo provider values/messages.
+            const reason =
+              issue.code === 'invalid_type'
+                ? issue.received === 'undefined'
+                  ? '缺少必填字段'
+                  : '类型错误'
+                : issue.code === 'too_big'
+                  ? `超过上限 ${issue.maximum}`
+                  : issue.code === 'too_small'
+                    ? `未达到下限 ${issue.minimum}`
+                    : '取值不符合要求';
+            return `${path}（${reason}）`;
+          }),
         ),
       ];
       throw new AiCallError(
@@ -306,5 +327,6 @@ export const prompts = {
   advice:
     '结合检索到的历史记忆、用户与对象档案、摘要、原始消息和量化变化，输出 {analysis:string,advice:string}。分析需说明证据、不确定性和历史关联。建议应具体、尊重双方边界，不生成可直接代发的回复选项。',
   consolidate:
-    '根据 participants 中的 QQ 身份和 messages.senderRole 区分用户(self)、当前对象(contact)与其他群成员(other)，不能依据昵称、第一人称或摘要猜测身份。只归纳当前 contact 的资料，严禁把用户或其他人的事情、提问、喜好和习惯赋予对象。群聊 relevant 只是批次筛选，每条证据仍须单独判断是否属于对象且与用户相关；无关技术讨论不记录。引用、转述和图片占位符不能视为发送者自身事实，证据不足就保留原画像且不新增记忆。摘要、旧画像和旧记忆不能充当新增事实的来源。traits 仅包含本批可能相关的已有画像字段；输出 traits 只能包含输入提供的字段，仅返回有新增证据、确需修改的字段，未修改字段省略（无修改返回 {}），后台保留其余字段。对输入提供的字段，在原字段内容基础上覆盖总结对象喜好(likes)、忌讳(boundaries)、沟通习惯(communication)，保留用户修订和未被新证据否定的信息。补读较旧历史时优先补充有证据的长期事实，不依据较早记录覆盖当前画像中较新的信息。长期记忆采用高门槛，默认不记录，允许 memories 返回空数组；归纳触发不代表必须产生事件。仅保留有明确证据且会持续影响对象生活、双方关系或后续相处的事实：event 为对象的重要生活节点或有实质后果的经历；promise 为对象明确参与、尚需履行或跟进的具体约定；relationship 为明确的关系、信任或边界变化；emotion 为有明确诱因和持续影响的显著情绪节点，不能收录一时语气波动。每条候选先判断未来是否有必要据此跟进或调整相处方式，无法说明具体持续影响则舍弃。普通技术问答、工具或功能咨询、操作说明、报错排查、一次性信息交换和普通闲聊均不记录；即使多轮、内容详细、对象回复或与用户有关，也不因此变成重要事件。技术话题只有另有明确的重要生活后果或双方具体待履行约定时，才提取该后果或约定，不保存问答过程。不能用 event 兜底保存不满足其他类别的内容；existingMemories 是本地筛选的候选重复记忆，不保证完整，也不保证一定重复。区分同一事件的重复表述、新进展与另一件相似的事；不能重复保存已有事件，也不能仅因话题相似就丢弃真正的新进展。每个变更的画像字段都须在 traitSourceIds 对应字段中提供本批消息 id，且至少包含对象本人发言；未变更字段的来源可为空。记忆涉及图片内容时，sourceIds 必须包含图片所在消息的 id；图片描述不能单独证明对象本人经历或承诺。后台会自动保存所引用消息的图片分析快照，无需在输出中重复整段图片分析。每条记忆必须以当前对象为主体（subjectId 等于 contact.qq），明确叙述谁做了什么，来源至少包含对象本人发言；双方约定须明确各方角色，不能只根据用户单方面发言推断对象承诺。输出 {traits:{likes,boundaries,communication},traitSourceIds:{likes:string[],boundaries:string[],communication:string[]},memories:[{subjectId:string,kind:"event"|"promise"|"relationship"|"emotion",text,time,sourceIds,keywords}]}。time 必须是来源消息的 Unix 毫秒时间，sourceIds 必须是提供消息中的 id，保留明确发生时间与来源。',
+    '根据 participants 中的 QQ 身份和 messages.senderRole 区分用户(self)、当前对象(contact)与其他群成员(other)，不能依据昵称、第一人称或摘要猜测身份。只归纳当前 contact 的资料，严禁把用户或其他人的事情、提问、喜好和习惯赋予对象。群聊 relevant 只是批次筛选，每条证据仍须单独判断是否属于对象且与用户相关；无关技术讨论不记录。引用、转述和图片占位符不能视为发送者自身事实，证据不足就保留原画像且不新增记忆。摘要、旧画像和旧记忆不能充当新增事实的来源。traits 仅包含本批可能相关的已有画像字段；输出 traits 只能包含输入提供的字段，仅返回有新增证据、确需修改的字段，未修改字段省略（无修改返回 {}），后台保留其余字段。对输入提供的字段，在原字段内容基础上覆盖总结对象喜好(likes)、忌讳(boundaries)、沟通习惯(communication)，保留用户修订和未被新证据否定的信息。补读较旧历史时优先补充有证据的长期事实，不依据较早记录覆盖当前画像中较新的信息。长期记忆采用高门槛，默认不记录，允许 memories 返回空数组；归纳触发不代表必须产生事件。仅保留有明确证据且会持续影响对象生活、双方关系或后续相处的事实：event 为对象的重要生活节点或有实质后果的经历；promise 为对象明确参与、尚需履行或跟进的具体约定；relationship 为明确的关系、信任或边界变化；emotion 为有明确诱因和持续影响的显著情绪节点，不能收录一时语气波动。每条候选先判断未来是否有必要据此跟进或调整相处方式，无法说明具体持续影响则舍弃。普通技术问答、工具或功能咨询、操作说明、报错排查、一次性信息交换和普通闲聊均不记录；即使多轮、内容详细、对象回复或与用户有关，也不因此变成重要事件。技术话题只有另有明确的重要生活后果或双方具体待履行约定时，才提取该后果或约定，不保存问答过程。不能用 event 兜底保存不满足其他类别的内容；existingMemories 是本地筛选的候选重复记忆，不保证完整，也不保证一定重复。区分同一事件的重复表述、新进展与另一件相似的事；不能重复保存已有事件，也不能仅因话题相似就丢弃真正的新进展。每个变更的画像字段都须在 traitSourceIds 对应字段中提供本批消息 id，且至少包含对象本人发言；未变更字段的来源可为空。记忆涉及图片内容时，sourceIds 必须包含图片所在消息的 id；图片描述不能单独证明对象本人经历或承诺。后台会自动保存所引用消息的图片分析快照，无需在输出中重复整段图片分析。每条记忆必须以当前对象为主体（subjectId 等于 contact.qq），明确叙述谁做了什么，来源至少包含对象本人发言；双方约定须明确各方角色，不能只根据用户单方面发言推断对象承诺。time 必须是来源消息的 Unix 毫秒时间，sourceIds 必须是提供消息中的 id，保留明确发生时间与来源。' +
+    `\n输出契约（所有长度均按字符计）：顶层必须包含 traits、traitSourceIds、memories。traits 与 traitSourceIds 必须是对象，仅可使用 likes、boundaries、communication 作为字段名；traits 每个值必须是字符串，最多 ${consolidationLimits.traitCharacters} 字符；每个变更字段必须有同名 traitSourceIds 字符串数组，最多 ${consolidationLimits.sourceIds} 项。无修改时两者均返回 {}。memories 必须是数组，最多 ${consolidationLimits.memories} 条；没有符合项时返回 []，不要生成空对象或空文本占位。每条记忆的所有字段都必填：subjectId 是非空字符串；kind 仅为 event、promise、relationship、emotion 之一；text 是直接叙述事件的非空字符串，最多 ${consolidationLimits.textCharacters} 字符，不是对象或数组，不得改名为 content、summary 或 description；time 是 Unix 毫秒数字，不能是日期字符串；sourceIds 是包含 1 至 ${consolidationLimits.sourceIds} 项的消息 id 字符串数组；keywords 是最多 ${consolidationLimits.keywords} 项的字符串数组，每项最多 ${consolidationLimits.keywordCharacters} 字符，无关键词返回 []。精炼 text，只保留事实、时间和持续影响，不复制聊天全文；无法形成完整且有证据的记忆则舍弃该条。\n合法空结果：{"traits":{},"traitSourceIds":{},"memories":[]}。单条记忆的结构示例（仅示范格式，身份、时间和来源必须替换成本批真实证据，不得照抄示例事实）：{"traits":{},"traitSourceIds":{},"memories":[{"subjectId":"示例对象QQ","kind":"promise","text":"对象与用户约定下周一起参加活动，具体安排待双方确认。","time":1700000000000,"sourceIds":["示例消息id"],"keywords":["活动约定"]}]}。只返回 JSON，不要 Markdown 代码块。返回前逐条核对字段名、类型、长度和来源；不得把输入 existingMemories 的存储结构直接用作输出。`,
 };
