@@ -1,5 +1,14 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
+import { analysisContextLimits } from '../shared/schema.js';
+import {
+  compactText,
+  selectBridgeMessages,
+  selectDecisionEvidence,
+  compactSignals,
+  selectDuplicateMemories,
+  selectRelatedTraits,
+} from './context-selection.js';
 import { Store } from './store.js';
 import { ImageContextError } from './ai-context.js';
 import {
@@ -164,7 +173,11 @@ export class AnalysisEngine {
   }
   private participants(contact: Contact) {
     return {
-      self: { ...this.store.self, qq: this.store.settings.selfQq },
+      self: {
+        qq: this.store.settings.selfQq,
+        name: this.store.self.name,
+        aliases: this.store.self.aliases,
+      },
       contact: { id: contact.id, qq: contact.qq, name: contact.name },
     };
   }
@@ -349,27 +362,43 @@ export class AnalysisEngine {
       if (pending.length === 0) break;
       this.store.saveConversation({ ...current.conversation, status: '摘要分析中', error: '' });
       this.changed();
+      const previousSummary = compactText(
+        current.conversation.summary,
+        analysisContextLimits.legacySummaryCharacters,
+      );
+      const retainedCharacters = Math.min(
+        analysisContextLimits.retainedSummaryCharacters,
+        Math.floor(previousSummary.length * analysisContextLimits.summaryRetentionRatio),
+      );
       const context = {
-        self: this.store.self,
         participants: this.participants(current.contact),
-        contact: current.contact,
+        contact: { id: current.contact.id, qq: current.contact.qq, name: current.contact.name },
         kind: current.conversation.kind,
-        previousSummary: current.conversation.summary,
+        previousSummary,
+        summaryBudget: {
+          retainedCharacters,
+          currentCharacters: analysisContextLimits.currentSummaryCharacters,
+          totalCharacters: analysisContextLimits.summaryCharacters,
+        },
         recentContext: this.attributedMessages(
-          this.store
-            .messages(id, 0, 10)
-            .filter((message) => message.sequence <= current.conversation.processedSequence),
+          selectBridgeMessages(
+            this.store.messagesBeforeSequence(id, current.conversation.processedSequence, 24),
+            pending,
+            [this.store.settings.selfQq, current.contact.qq],
+          ),
           current.contact,
         ),
         messages: this.attributedMessages(pending, current.contact),
-        previousSignals: this.store.observations(id).slice(-5),
+        previousSignals: compactSignals(this.store.observations(id)),
       };
       const result = await this.callAi(
         id,
         '摘要更新',
         prompts.summary,
         context,
-        summaryResultSchema,
+        summaryResultSchema.extend({
+          compressedPreviousSummary: z.string().max(retainedCharacters),
+        }),
         controller,
       );
       if (!this.valid(id, controller)) return;
@@ -390,7 +419,11 @@ export class AnalysisEngine {
       const latest = this.store.conversation(id)!;
       this.store.saveConversation({
         ...latest,
-        summary: relevant ? result.summary : latest.summary,
+        summary: relevant
+          ? [result.compressedPreviousSummary.trim(), result.summary.trim()]
+              .filter(Boolean)
+              .join('\n')
+          : latest.summary,
         processedSequence: pending.at(-1)!.sequence,
         status: '观察中',
         error: '',
@@ -448,13 +481,22 @@ export class AnalysisEngine {
       );
       return;
     }
+    const observations = this.store.observations(id);
+    const evidence = selectDecisionEvidence(recent, observations, [
+      this.store.settings.selfQq,
+      contact.qq,
+    ]);
     const context = {
-      self: this.store.self,
       participants: this.participants(contact),
-      contact,
-      summary: conversation.summary,
-      messages: this.attributedMessages(recent, contact),
-      signals: this.store.observations(id).slice(-20),
+      kind: conversation.kind,
+      summary: compactText(conversation.summary, analysisContextLimits.summaryCharacters),
+      messages: this.attributedMessages(evidence, contact),
+      evidenceCoverage: {
+        totalMessages: this.store.pendingMessageCount(id, conversation.lastDecisionSequence),
+        selectedMessages: evidence.length,
+        textIsExcerpted: true,
+      },
+      signals: compactSignals(observations),
     };
     const gate = await this.callAi(
       id,
@@ -476,7 +518,19 @@ export class AnalysisEngine {
         id,
         '详细建议生成',
         prompts.advice,
-        { ...context, memories, gate },
+        {
+          ...context,
+          evidenceCoverage: {
+            ...context.evidenceCoverage,
+            selectedMessages: recent.length,
+            textIsExcerpted: false,
+          },
+          self: this.store.self,
+          contact,
+          messages: this.attributedMessages(recent, contact),
+          memories,
+          gate,
+        },
         adviceResultSchema,
         controller,
       );
@@ -553,19 +607,23 @@ export class AnalysisEngine {
     controller: AbortController,
   ): Promise<void> {
     const { contact, conversation } = this.active(id)!;
+    const traits = selectRelatedTraits(contact.traits, messages);
+    const existingMemories = selectDuplicateMemories(
+      this.store.memories(contact.id),
+      messages,
+      contact.id,
+    ).map(({ id, kind, text, time }) => ({ id, kind, text, time }));
     const result = await this.callAi(
       id,
       '画像与记忆归纳',
       prompts.consolidate,
       {
-        self: this.store.self,
         participants: this.participants(contact),
-        contact,
+        contact: { id: contact.id, qq: contact.qq, name: contact.name },
         kind: conversation.kind,
-        traits: contact.traits,
-        summary: conversation.summary,
+        traits,
         messages: this.attributedMessages(messages, contact),
-        existingMemories: this.store.memories(contact.id).slice(-60),
+        existingMemories,
       },
       consolidationSchema,
       controller,
@@ -580,16 +638,25 @@ export class AnalysisEngine {
         return source?.senderId === contact.qq && source.senderId !== this.store.settings.selfQq;
       });
     // Validate the entire result before writing; failed attribution must remain retryable.
+    const updatedTraits = { ...contact.traits };
     for (const field of ['likes', 'boundaries', 'communication'] as const) {
+      const value = result.traits[field];
+      if (value === undefined || value === contact.traits[field]) continue;
+      if (traits[field] === undefined) {
+        throw new AnalysisFailure(
+          '画像与记忆归纳失败（步骤：画像证据校验）：模型修改了未提供的画像字段，本批结果未保存，请重新检查。',
+        );
+      }
       if (
         result.traits[field] !== contact.traits[field] &&
-        !hasContactEvidence(result.traitSourceIds[field])
+        !hasContactEvidence(result.traitSourceIds[field] ?? [])
       ) {
         const label = { likes: '喜好', boundaries: '忌讳与边界', communication: '沟通习惯' }[field];
         throw new AnalysisFailure(
           `画像与记忆归纳失败（步骤：画像证据校验）：“${label}”的修改缺少对象本人的有效消息证据。来源须来自本批消息，且至少包含对象本人发言。本批归纳结果未保存，请重新检查。`,
         );
       }
+      updatedTraits[field] = value;
     }
     for (const memory of result.memories) {
       if (memory.subjectId !== contact.qq) {
@@ -610,7 +677,7 @@ export class AnalysisEngine {
     if (latestContact.traitsRevision === contact.traitsRevision) {
       this.store.saveContact({
         ...latestContact,
-        traits: result.traits,
+        traits: updatedTraits,
         traitsRevision: latestContact.traitsRevision + 1,
       });
     }

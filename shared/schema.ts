@@ -1,5 +1,20 @@
 import { z } from 'zod';
 
+// Text budgets are shared with AI output validation and prompt construction.
+export const analysisContextLimits = {
+  summaryCharacters: 1000,
+  retainedSummaryCharacters: 600,
+  legacySummaryCharacters: 6000,
+  currentSummaryCharacters: 380,
+  summaryRetentionRatio: 0.65,
+  bridgeMessages: 4,
+  bridgeMessageCharacters: 600,
+  decisionEvidenceMessages: 6,
+  decisionMessageCharacters: 500,
+  duplicateMemories: 8,
+  duplicateMemoryCharacters: 6000,
+} as const;
+
 export const selfProfileSchema = z.object({
   name: z.string().trim().min(1).max(80).default('我'),
   aliases: z.array(z.string().min(1).max(80)).max(30).default([]),

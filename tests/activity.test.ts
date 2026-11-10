@@ -8,6 +8,7 @@ import { analysisRunSchema, contactSchema, conversationSchema } from '../shared/
 import { fixture, deferred } from './helpers.js';
 
 const summary = {
+  compressedPreviousSummary: '',
   summary: '测试摘要',
   relevant: true,
   significant: false,

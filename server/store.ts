@@ -187,6 +187,17 @@ export class Store {
         messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }),
       );
   }
+  messagesBeforeSequence(conversationId: string, beforeSequence: number, limit: number): Message[] {
+    return this.database
+      .prepare(
+        'SELECT sequence,data FROM messages WHERE conversation_id=? AND sequence<=? ORDER BY sequence DESC LIMIT ?',
+      )
+      .all(conversationId, beforeSequence, limit)
+      .reverse()
+      .map((row) =>
+        messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }),
+      );
+  }
   pendingMessageCount(conversationId: string, afterSequence: number, liveOnly = false): number {
     const row = this.database
       .prepare(

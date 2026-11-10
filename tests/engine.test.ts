@@ -7,6 +7,7 @@ import { fixture, deferred } from './helpers.js';
 import { buildContextContent } from '../server/ai-context.js';
 
 const light = {
+  compressedPreviousSummary: '',
   summary: '讨论周六见面；时间尚未回答。',
   relevant: true,
   significant: false,
@@ -1024,3 +1025,315 @@ for (const pause of ['contact', 'conversation'] as const) {
     }
   });
 }
+
+test(
+  '多轮摘要仅调用一次摘要模型，下一轮基于上次合并摘要继续压缩且始终有长度上限',
+  { timeout: 5000 },
+  async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    data.store.settings = {
+      ...data.store.settings,
+      summaryMessageThreshold: 2,
+      messageThreshold: 200,
+      consolidationMessageThreshold: 1000,
+    };
+    data.store.saveConversation({ ...data.conversation, summary: '旧'.repeat(1000) });
+    let expected = data.store.conversation(data.conversation.id)!.summary;
+    let expectedSequence = 0;
+    let completed = deferred<void>();
+    const lengths: number[] = [];
+    const ai = new FakeAi((instruction, _signal, payload) => {
+      assert.equal(instruction, prompts.summary);
+      const input = z
+        .object({
+          previousSummary: z.string(),
+          summaryBudget: z.object({ retainedCharacters: z.number() }),
+        })
+        .parse(payload);
+      assert.equal(input.previousSummary, expected);
+      const budget = Math.min(600, Math.floor(expected.length * 0.65));
+      assert.equal(input.summaryBudget.retainedCharacters, budget);
+      const compressedPreviousSummary = expected.slice(0, budget);
+      expected = `${compressedPreviousSummary}\n${'新'.repeat(120)}`;
+      return { ...light, compressedPreviousSummary, summary: '新'.repeat(120) };
+    });
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      if (engine.activity(data.conversation.id).at(-1)?.status === 'completed') completed.resolve();
+    });
+    try {
+      for (let round = 0; round < 4; round++) {
+        completed = deferred<void>();
+        for (let index = 0; index < 2; index++)
+          data.store.addMessage(data.message(String(++expectedSequence)));
+        engine.notify(data.conversation.id);
+        context.mock.timers.tick(0);
+        await completed.promise;
+        const current = data.store.conversation(data.conversation.id)!;
+        assert.equal(current.summary, expected);
+        assert.equal(current.processedSequence, expectedSequence);
+        assert.ok(current.summary.length <= 1000);
+        lengths.push(current.summary.length);
+      }
+      assert.equal(ai.calls.length, 4);
+      assert.ok(lengths.every((length, index) => index === 0 || length < lengths[index - 1]!));
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  },
+);
+
+for (const part of ['old', 'new'] as const) {
+  test(`拒绝 ${part} 摘要超出压缩预算，保留原摘要与进度并允许重试`, { timeout: 5000 }, async () => {
+    const data = fixture();
+    const original = '原'.repeat(100);
+    data.store.saveConversation({ ...data.conversation, summary: original });
+    const failed = watcher(
+      () => data.store.conversation(data.conversation.id)?.status === '分析失败',
+    );
+    const completed = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+    );
+    let retry = false;
+    const ai = new FakeAi((instruction) => {
+      if (instruction === prompts.summary)
+        return {
+          ...light,
+          compressedPreviousSummary: !retry && part === 'old' ? '旧'.repeat(66) : '旧',
+          summary: !retry && part === 'new' ? '新'.repeat(381) : '新',
+        };
+      if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
+      return { traits: {}, traitSourceIds: {}, memories: [] };
+    });
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      failed.changed();
+      completed.changed();
+    });
+    try {
+      data.store.addMessage(data.message('1'));
+      engine.flush(data.conversation.id);
+      await failed.promise;
+      assert.equal(data.store.conversation(data.conversation.id)!.summary, original);
+      assert.equal(data.store.conversation(data.conversation.id)!.processedSequence, 0);
+      assert.equal(data.store.observations(data.conversation.id).length, 0);
+      retry = true;
+      engine.flush(data.conversation.id);
+      await completed.promise;
+      assert.equal(data.store.conversation(data.conversation.id)!.summary, '旧\n新');
+    } finally {
+      await engine.stop();
+      data.cleanup();
+    }
+  });
+}
+
+test('旧版六千字符摘要首次整体交给压缩模型，成功后转为紧凑摘要', { timeout: 5000 }, async () => {
+  const data = fixture();
+  const original = `开头${'中'.repeat(5996)}结尾`;
+  data.store.saveConversation({ ...data.conversation, summary: original });
+  const completed = watcher(
+    () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+  );
+  const ai = new FakeAi((instruction, _signal, payload) => {
+    if (instruction === prompts.summary) {
+      const input = z.object({ previousSummary: z.string() }).parse(payload);
+      assert.equal(input.previousSummary, original);
+      return { ...light, compressedPreviousSummary: '之前仍有未完成约定' };
+    }
+    if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
+    return consolidation;
+  });
+  const engine = new AnalysisEngine(data.store, ai, completed.changed);
+  try {
+    data.store.addMessage(data.message('1'));
+    engine.flush(data.conversation.id);
+    await completed.promise;
+    assert.ok(data.store.conversation(data.conversation.id)!.summary.length <= 1000);
+  } finally {
+    await engine.stop();
+    data.cleanup();
+  }
+});
+
+test(
+  '建议判断只携带紧凑摘要、变化指标及六条证据，详细建议仍有原始消息',
+  { timeout: 5000 },
+  async () => {
+    const data = fixture();
+    const completed = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+    );
+    const ai = new FakeAi((instruction, _signal, payload) => {
+      if (instruction === prompts.summary) return light;
+      if (instruction === prompts.gate) {
+        const input = z
+          .object({
+            summary: z.string().max(1000),
+            messages: z
+              .array(z.object({ text: z.string().max(500), senderRole: z.string() }))
+              .max(6),
+            signals: z.object({
+              attitude: z.number(),
+              attitudeChange: z.number().nullable(),
+              reason: z.string().max(300),
+            }),
+            evidenceCoverage: z.object({ totalMessages: z.number(), selectedMessages: z.number() }),
+          })
+          .parse(payload);
+        assert.equal(input.messages.length, 6);
+        assert.equal(input.evidenceCoverage.totalMessages, 40);
+        assert.equal(input.evidenceCoverage.selectedMessages, 6);
+        assert.ok(!('self' in z.object({}).passthrough().parse(payload)));
+        return { needed: true, reason: '约定需要跟进', keywords: [] };
+      }
+      if (instruction === prompts.advice) {
+        const input = z
+          .object({
+            messages: z.array(z.object({ text: z.string() })),
+            self: z.unknown(),
+            contact: z.unknown(),
+            evidenceCoverage: z.object({
+              selectedMessages: z.number(),
+              textIsExcerpted: z.boolean(),
+            }),
+          })
+          .parse(payload);
+        assert.equal(input.messages.length, 40);
+        assert.equal(input.evidenceCoverage.selectedMessages, 40);
+        assert.equal(input.evidenceCoverage.textIsExcerpted, false);
+        assert.ok(input.messages.every((message) => message.text.length > 500));
+        return { analysis: '根据原始消息', advice: '确认安排' };
+      }
+      return consolidation;
+    });
+    const engine = new AnalysisEngine(data.store, ai, completed.changed);
+    try {
+      for (let index = 1; index <= 40; index++)
+        data.store.addMessage(data.message(String(index), '见面安排'.repeat(200)));
+      engine.flush(data.conversation.id);
+      await completed.promise;
+      assert.equal(data.store.decisions(data.conversation.id)[0]?.needed, true);
+    } finally {
+      await engine.stop();
+      data.cleanup();
+    }
+  },
+);
+
+test(
+  '归纳仅传相关画像和全历史候选重复记忆，部分画像更新保留未提供字段',
+  { timeout: 5000 },
+  async () => {
+    const data = fixture();
+    const traits = {
+      likes: '偏好阅读小说',
+      boundaries: '不公开家庭住址',
+      communication: '先写文字再交流',
+    };
+    data.store.saveContact({ ...data.contact, traits });
+    for (let index = 0; index < 70; index++)
+      data.store.saveMemory({
+        id: String(index),
+        contactId: data.contact.id,
+        kind: 'promise',
+        text: index === 0 ? '周六在公园见面' : '更新服务器配置文件',
+        keywords: index === 0 ? ['周六', '公园'] : ['服务器'],
+        time: index,
+        createdAt: index,
+        sourceIds: ['old'],
+      });
+    const completed = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+    );
+    const ai = new FakeAi((instruction, _signal, payload) => {
+      if (instruction === prompts.summary) return light;
+      if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
+      const input = z
+        .object({
+          traits: z.record(z.string()),
+          existingMemories: z.array(z.object({ id: z.string() })),
+          contact: z.object({}).passthrough(),
+        })
+        .passthrough()
+        .parse(payload);
+      assert.deepEqual(input.traits, { likes: traits.likes });
+      assert.deepEqual(
+        input.existingMemories.map((memory) => memory.id),
+        ['0'],
+      );
+      assert.equal('summary' in input, false);
+      assert.equal('traits' in input.contact, false);
+      assert.equal('self' in input, false);
+      return {
+        traits: { likes: '偏好阅读小说，也喜欢登山' },
+        traitSourceIds: { likes: ['1'] },
+        memories: [],
+      };
+    });
+    const engine = new AnalysisEngine(data.store, ai, completed.changed);
+    try {
+      data.store.addMessage(data.message('1', '我喜欢登山，周六在公园见面改到周日。'));
+      engine.flush(data.conversation.id);
+      await completed.promise;
+      assert.deepEqual(data.store.contact(data.contact.id)!.traits, {
+        ...traits,
+        likes: '偏好阅读小说，也喜欢登山',
+      });
+    } finally {
+      await engine.stop();
+      data.cleanup();
+    }
+  },
+);
+
+test(
+  '归纳拒绝覆盖未提供画像字段，即使带有效消息来源也不推进记忆检查点',
+  { timeout: 5000 },
+  async () => {
+    const data = fixture();
+    const traits = {
+      likes: '偏好阅读小说',
+      boundaries: '不公开家庭住址',
+      communication: '先写文字再交流',
+    };
+    data.store.saveContact({ ...data.contact, traits });
+    const failed = watcher(
+      () => data.store.conversation(data.conversation.id)?.status === '分析失败',
+    );
+    const completed = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+    );
+    let retry = false;
+    const ai = new FakeAi((instruction) => {
+      if (instruction === prompts.summary) return light;
+      if (instruction === prompts.gate) return { needed: false, reason: '无需建议', keywords: [] };
+      return {
+        traits: retry ? {} : { boundaries: '' },
+        traitSourceIds: { boundaries: ['1'] },
+        memories: [],
+      };
+    });
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      failed.changed();
+      completed.changed();
+    });
+    try {
+      data.store.addMessage(data.message('1', '我喜欢登山。'));
+      engine.flush(data.conversation.id);
+      await failed.promise;
+      assert.match(data.store.conversation(data.conversation.id)!.error, /未提供的画像字段/);
+      assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 0);
+      assert.equal(data.store.conversation(data.conversation.id)!.processedSequence, 1);
+      assert.deepEqual(data.store.contact(data.contact.id)!.traits, traits);
+      retry = true;
+      engine.flush(data.conversation.id);
+      await completed.promise;
+      assert.deepEqual(data.store.contact(data.contact.id)!.traits, traits);
+    } finally {
+      await engine.stop();
+      data.cleanup();
+    }
+  },
+);
