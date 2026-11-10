@@ -17,7 +17,11 @@ test('会话展示态度情绪及建议原因，移除内部摘要、采纳和�
       settings: data.store.settings,
       hasApiKey: false,
       hasQqToken: false,
-      bridge: { connected: false, status: '未连接' },
+      bridge: {
+        connected: false,
+        status: '未连接',
+        reception: { incoming: 3, selfReceived: 2, selfAccepted: 1 },
+      },
     };
     for (const needed of [true, false]) {
       const html = renderToStaticMarkup(
@@ -79,6 +83,11 @@ test('会话展示态度情绪及建议原因，移除内部摘要、采纳和�
     ])
       assert.ok(settings.includes(label));
     assert.equal(settings.includes('冷却'), false);
+    assert.match(settings, /reportSelfMessage/);
+    assert.match(settings, /收到本人事件/);
+    assert.match(settings, /成功解析/);
+    assert.match(settings, /本机客户端发言支持/);
+    assert.match(settings, /重连清零/);
   } finally {
     data.cleanup();
   }

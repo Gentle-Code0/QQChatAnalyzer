@@ -404,6 +404,23 @@ export function SettingsForm({
           测试当前填写的配置；Key 留空时使用已保存的 Key。测试会产生一次模型调用，不会保存配置。
         </p>
         <h3>QQ · SnowLuma OneBot v11</h3>
+        <p className="muted small">
+          请在 SnowLuma 对应的 WebSocket 服务开启“自身消息上报”（reportSelfMessage），并放行
+          message_sent 事件。只显示对象发言时，先观察下方计数，再从原 QQ 客户端手动发言确认。
+        </p>
+        {state.bridge.reception && (
+          <div className="notice" role="status">
+            本次 WebSocket 连接：收到他人消息 {state.bridge.reception.incoming} 条；收到本人事件{' '}
+            {state.bridge.reception.selfReceived} 条，成功解析 {state.bridge.reception.selfAccepted}{' '}
+            条。
+            <p className="small">
+              本人事件不增加：检查 SnowLuma
+              的上报、事件过滤及本机客户端发言支持；本人事件增加但成功解析不增加：事件格式未通过校验。
+              成功解析增加但对话未出现：检查私聊接收者与对象
+              QQ、所选会话。计数仅含实时事件，重连清零，不代表历史完整度。
+            </p>
+          </div>
+        )}
         <Field
           label="WebSocket 地址"
           hint="填写 QQ 所在电脑的局域网 IP 和 OneBot 正向 WebSocket 端口。"

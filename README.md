@@ -53,9 +53,19 @@ SnowLuma 是第三方桥接，客户端兼容性和影响需用户在实际环�
 
 在 QQ 所在电脑安装 [SnowLuma 发行版](https://github.com/SnowLuma/SnowLuma/releases)，按其 [部署文档](https://snowluma.github.io/zh/docs/guide/deploy)接入已登录 QQ。为对应账号开启 OneBot v11 **正向 WebSocket 服务端**，配置强 Access Token，并允许 Docker 主机访问此端口。
 
-开启自身消息上报 `reportSelfMessage`，否则无法观察你自己通过 PC / 手机发送的消息。事件过滤须放行 `message` 和 `message_sent`、所需私聊与群。应用通过 `get_login_info` 校验自身 QQ，防止接错账号。第一次连接失败时检查 OneBot 端口，而不是 SnowLuma WebUI 的 5099 端口。
+在 **ChatAnalyzer 实际连接的 WebSocket 服务条目**上开启自身消息上报 `reportSelfMessage: true`（`networks.wsServers` 中对应的条目；多账号还须核对当前账号的覆盖配置）。该选项默认关闭；仅在另一个 HTTP／WebSocket 条目启用不会作用于当前连接。自身消息还依赖 SnowLuma 对当前 QQ 客户端和发送设备的支持。事件过滤须放行 `message` 和 `message_sent`、所需私聊与群。应用通过 `get_login_info` 校验自身 QQ，防止接错账号。第一次连接失败时检查 OneBot 端口，而不是 SnowLuma WebUI 的 5099 端口。
 
 QQ 与 Docker 在不同电脑时使用 QQ 电脑的局域网 IP；同一宿主机可使用 `ws://host.docker.internal:端口`。容器内的 `127.0.0.1` 指向容器本身。QQ 主机 IP 改变后需更新设置。
+
+#### 只显示对象发言时
+
+连接成功只说明账号与 WebSocket 可用，不代表双向事件都已上报。打开“连接设置”，记录本次 WebSocket 的接收计数，然后在原 QQ 客户端手动向已建档对象发送一条测试消息：
+
+- “收到本人事件”不增加：当前连接未收到对应账号的自身消息事件，检查上述配置与事件过滤。SnowLuma 曾有“开启上报但注入所在电脑手动发言仍不上报”的[上游问题 #528](https://github.com/SnowLuma/SnowLuma/issues/528)及后续修复；需结合实际 SnowLuma／QQ 版本与运行组件判断，不能仅凭开关认定已上报。
+- “收到本人事件”增加而“成功解析”不增加：事件缺少必要字段或类型无效；标准自身私聊须携带发送者 `user_id`、接收者 `target_id`、消息 ID、时间与消息内容。应使用脱敏事件结构排查，不上传真实聊天或 Token。
+- “成功解析”增加但对话缺失：核对事件接收者与对象绑定 QQ、所选私聊／群聊。接收计数覆盖当前账号的所有实时会话，不等于该对象的入库条数；重连清零，不含历史接口结果。
+
+ChatAnalyzer 不按发送者过滤对话消息，已接收的双方消息都会进入对应会话及分析上下文。修复上报后，新增发言应实时出现。缺失的旧发言仅能从 SnowLuma 可读取的历史补回，可在“历史记忆”点击“继续读取 / 重试”；补读到原锚点即停止，不会重新扫描已处理的全部旧记录，较早缺口可能仍无法补回。“重新检查”只重试分析，不会获取漏掉的聊天，也不会自动重建已保存的画像或记忆。
 
 ### 数据与密钥
 

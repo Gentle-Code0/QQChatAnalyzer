@@ -117,6 +117,7 @@ export class Application {
       bridge: {
         connected: this.bridge?.connected ?? false,
         status: this.bridge?.status ?? '未配置 QQ 连接',
+        reception: this.bridge?.reception,
       },
     };
   }

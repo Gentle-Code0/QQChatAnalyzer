@@ -216,7 +216,11 @@ export interface Snapshot {
   settings: Settings;
   hasApiKey: boolean;
   hasQqToken: boolean;
-  bridge: { connected: boolean; status: string };
+  bridge: {
+    connected: boolean;
+    status: string;
+    reception?: { incoming: number; selfReceived: number; selfAccepted: number };
+  };
 }
 export const activityStatusSchema = z.enum([
   'waiting',

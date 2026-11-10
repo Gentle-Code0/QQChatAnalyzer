@@ -174,6 +174,10 @@ export function normalizeMessage(
 export class QqBridge {
   connected = false;
   status = '未连接';
+  private receptionCounts = { incoming: 0, selfReceived: 0, selfAccepted: 0 };
+  get reception() {
+    return { ...this.receptionCounts };
+  }
   private socket: WebSocket | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly pending = new Map<string, PendingRequest>();
@@ -191,6 +195,7 @@ export class QqBridge {
   }
   private connect(): void {
     if (this.stopped) return;
+    this.receptionCounts = { incoming: 0, selfReceived: 0, selfAccepted: 0 };
     this.status = '正在连接';
     this.options.onStatus();
     const socket = new WebSocket(this.options.url, {
@@ -253,8 +258,26 @@ export class QqBridge {
           }
         }
         if (!this.connected) return;
+        // Count only events for the verified account. Never retain payloads in diagnostics.
+        const identity = z
+          .object({
+            self_id: identifierSchema,
+            post_type: z.enum(['message', 'message_sent']),
+            user_id: identifierSchema.optional(),
+          })
+          .safeParse(raw);
+        const fromSelf =
+          identity.success &&
+          identity.data.self_id === this.options.selfQq &&
+          (identity.data.post_type === 'message_sent' ||
+            identity.data.user_id === this.options.selfQq);
+        if (fromSelf) this.receptionCounts.selfReceived++;
         const message = normalizeMessage(raw, this.options.selfQq);
-        if (message) this.options.onMessage(message);
+        if (message) {
+          if (fromSelf) this.receptionCounts.selfAccepted++;
+          else if (message.senderId !== this.options.selfQq) this.receptionCounts.incoming++;
+          this.options.onMessage(message);
+        }
       } catch {
         this.status = '收到无效桥接数据';
         this.options.onStatus();
