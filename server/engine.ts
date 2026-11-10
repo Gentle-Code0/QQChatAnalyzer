@@ -29,6 +29,9 @@ interface ConversationWork {
   controller?: AbortController;
   debounce?: ReturnType<typeof setTimeout>;
   idle?: ReturnType<typeof setTimeout>;
+  summaryIdle?: ReturnType<typeof setTimeout>;
+  consolidationIdle?: ReturnType<typeof setTimeout>;
+  queuedTriggers?: string[];
 }
 export function retrieveMemories(memories: Memory[], keywords: string[], now: number): Memory[] {
   const terms = keywords.map((term) => term.toLocaleLowerCase()).filter(Boolean);
@@ -45,7 +48,7 @@ export function retrieveMemories(memories: Memory[], keywords: string[], now: nu
     .map((item) => item.memory);
 }
 
-/** Owns debounce/idle timers and every AI task. Abort + identity guards reject stale responses. */
+/** Owns independent stage timers and serial AI tasks. Abort + identity guards reject stale responses. */
 export class AnalysisEngine {
   private readonly work = new Map<string, ConversationWork>();
   private readonly tasks = new Set<Promise<void>>();
@@ -182,16 +185,30 @@ export class AnalysisEngine {
     const work: ConversationWork = { run: this.createRun(id, live ? '消息更新' : '历史归纳') };
     this.work.set(id, work);
     this.beginStep(id, 'schedule', '等待消息合并');
+    const { conversation } = this.active(id)!;
+    const settings = this.store.settings;
+    const thresholdReached =
+      this.store.pendingMessageCount(id, conversation.processedSequence) >=
+        settings.summaryMessageThreshold ||
+      this.store.pendingMessageCount(id, conversation.lastDecisionSequence, true) >=
+        settings.messageThreshold ||
+      this.store.pendingMessageCount(id, conversation.consolidatedSequence) >=
+        settings.consolidationMessageThreshold;
     work.debounce = setTimeout(
-      () => this.launch(id, live ? '消息更新' : '历史归纳'),
-      this.store.settings.mergeWindowSeconds * 1000,
+      () => this.launch(id, '消息更新'),
+      thresholdReached ? 0 : settings.mergeWindowSeconds * 1000,
     );
-    if (live)
-      work.idle = setTimeout(
-        () => this.launch(id, '对话静默'),
-        this.store.settings.idleSeconds * 1000,
-      );
+    work.summaryIdle = setTimeout(
+      () => this.launch(id, '摘要静默'),
+      settings.summaryIdleSeconds * 1000,
+    );
+    work.idle = setTimeout(() => this.launch(id, '对话静默'), settings.idleSeconds * 1000);
+    work.consolidationIdle = setTimeout(
+      () => this.launch(id, '归纳静默'),
+      settings.consolidationIdleSeconds * 1000,
+    );
   }
+
   flush(id: string): void {
     this.cancel(id, '用户发起重新检查');
     if (this.active(id)) this.launch(id, '手动检查');
@@ -202,13 +219,16 @@ export class AnalysisEngine {
     this.finishRun(work?.run, 'cancelled', reason);
     clearTimeout(work?.debounce);
     clearTimeout(work?.idle);
+    clearTimeout(work?.summaryIdle);
+    clearTimeout(work?.consolidationIdle);
     this.work.delete(id);
   }
   private launch(id: string, trigger: string): void {
     const work = this.work.get(id) ?? {};
-    work.controller?.abort();
-    if (work.run?.status === 'running')
-      this.finishRun(work.run, 'cancelled', '新检查触发，旧任务已取消');
+    if (work.run?.status === 'running') {
+      work.queuedTriggers = [...(work.queuedTriggers ?? []), trigger];
+      return;
+    }
     if (!work.run || work.run.status !== 'waiting') work.run = this.createRun(id, trigger);
     const run = work.run;
     for (const step of run.steps) {
@@ -244,6 +264,10 @@ export class AnalysisEngine {
       })
       .finally(() => {
         this.tasks.delete(task);
+        if (this.valid(id, controller)) {
+          const next = work.queuedTriggers?.shift();
+          if (next) this.launch(id, next);
+        }
       });
     this.tasks.add(task);
   }
@@ -296,10 +320,28 @@ export class AnalysisEngine {
     initialTrigger: string,
     controller: AbortController,
   ): Promise<void> {
-    let trigger = initialTrigger;
     let significant = false;
-    let relevant = this.store.observations(id).at(-1)?.relevant ?? false;
-    while (this.valid(id, controller)) {
+    const initial = this.active(id)!;
+    const settings = this.store.settings;
+    const manual = initialTrigger === '手动检查';
+    const decisionDue =
+      manual ||
+      initialTrigger === '对话静默' ||
+      this.store.pendingMessageCount(id, initial.conversation.lastDecisionSequence, true) >=
+        settings.messageThreshold;
+    const consolidationDue =
+      manual ||
+      initialTrigger === '归纳静默' ||
+      this.store.pendingMessageCount(id, initial.conversation.consolidatedSequence) >=
+        settings.consolidationMessageThreshold;
+    const summaryDue =
+      decisionDue ||
+      consolidationDue ||
+      initialTrigger === '摘要静默' ||
+      this.store.pendingMessageCount(id, initial.conversation.processedSequence) >=
+        settings.summaryMessageThreshold;
+    if (!summaryDue) this.skip(id, '摘要更新', '尚未达到摘要累计条数或静默时间');
+    while (summaryDue && this.valid(id, controller)) {
       const current = this.active(id)!;
       const messagesRead = this.beginStep(id, 'tool', '读取待处理消息');
       const pending = this.store.pendingMessages(id, current.conversation.processedSequence);
@@ -307,7 +349,6 @@ export class AnalysisEngine {
       if (pending.length === 0) break;
       this.store.saveConversation({ ...current.conversation, status: '摘要分析中', error: '' });
       this.changed();
-      const historical = pending.every((message) => message.source === 'history');
       const context = {
         self: this.store.self,
         participants: this.participants(current.contact),
@@ -332,7 +373,7 @@ export class AnalysisEngine {
         controller,
       );
       if (!this.valid(id, controller)) return;
-      relevant = current.conversation.kind === 'private' || result.relevant;
+      const relevant = current.conversation.kind === 'private' || result.relevant;
       significant ||= result.significant && relevant;
       const observationSaved = this.beginStep(id, 'storage', '保存态度与情绪分析');
       this.store.saveObservation({
@@ -344,8 +385,6 @@ export class AnalysisEngine {
         sourceIds: pending.map((message) => message.id),
       });
       observationSaved();
-      // Historical extraction is checkpointed only after the full batch has been consolidated.
-      if (historical && relevant) await this.consolidate(id, pending, controller);
       if (!this.valid(id, controller)) return;
       const summarySaved = this.beginStep(id, 'storage', '保存当前摘要');
       const latest = this.store.conversation(id)!;
@@ -353,16 +392,25 @@ export class AnalysisEngine {
         ...latest,
         summary: relevant ? result.summary : latest.summary,
         processedSequence: pending.at(-1)!.sequence,
-        consolidatedSequence:
-          historical && relevant ? pending.at(-1)!.sequence : latest.consolidatedSequence,
         status: '观察中',
         error: '',
       });
       this.changed();
       summarySaved();
-      if (historical) trigger = '历史归纳';
     }
     if (!this.valid(id, controller)) return;
+    await this.decide(id, initialTrigger, significant, controller);
+    if (!this.valid(id, controller)) return;
+    if (consolidationDue) await this.consolidatePending(id, controller);
+    else this.skip(id, '画像与记忆归纳', '尚未达到归纳累计条数或静默时间');
+  }
+  private async decide(
+    id: string,
+    trigger: string,
+    significant: boolean,
+    controller: AbortController,
+  ): Promise<void> {
+    let relevant = this.store.observations(id).at(-1)?.relevant ?? false;
     const { conversation, contact } = this.active(id)!;
     const recent = this.store.messages(id, conversation.lastDecisionSequence, 200);
     if (conversation.kind === 'group') {
@@ -378,18 +426,12 @@ export class AnalysisEngine {
     const liveCount = recent.filter((message) => message.source === 'live').length;
     const threshold = liveCount >= this.store.settings.messageThreshold;
     const due = trigger === '对话静默' || trigger === '手动检查' || threshold || significant;
-    if (!due || trigger === '历史归纳') {
+    if (!due || liveCount === 0) {
       this.skip(
         id,
         '建议判断',
-        trigger === '历史归纳'
-          ? '历史消息仅更新摘要与记忆，不生成建议'
-          : '尚未达到建议判断的触发条件',
+        liveCount === 0 ? '历史消息仅更新摘要与记忆，不生成建议' : '尚未达到建议判断的触发条件',
       );
-      return;
-    }
-    if (recent.length === 0) {
-      await this.consolidatePending(id, controller);
       return;
     }
     if (threshold) trigger = '消息数量阈值';
@@ -404,67 +446,52 @@ export class AnalysisEngine {
         trigger,
         [],
       );
-      this.store.saveConversation({
-        ...this.store.conversation(id)!,
-        consolidatedSequence: conversation.processedSequence,
-      });
       return;
     }
-    if (conversation.adoptedUntil > Date.now()) {
-      this.skip(id, '建议生成', '已采用建议，当前处于冷却期');
-      this.recordDecision(id, false, '已采用上一条建议，冷却期间暂不重复提醒。', '', trigger, []);
+    const context = {
+      self: this.store.self,
+      participants: this.participants(contact),
+      contact,
+      summary: conversation.summary,
+      messages: this.attributedMessages(recent, contact),
+      signals: this.store.observations(id).slice(-20),
+    };
+    const gate = await this.callAi(
+      id,
+      '建议必要性判断',
+      prompts.gate,
+      context,
+      gateResultSchema,
+      controller,
+    );
+    if (!this.valid(id, controller)) return;
+    if (!gate.needed) {
+      this.skip(id, '详细建议生成', '模型判断当前无需建议，原因已保存到判断记录');
+      this.recordDecision(id, false, gate.reason, '', trigger, []);
     } else {
-      const context = {
-        self: this.store.self,
-        participants: this.participants(contact),
-        contact,
-        summary: conversation.summary,
-        messages: this.attributedMessages(recent, contact),
-        signals: this.store.observations(id).slice(-20),
-      };
-      const gate = await this.callAi(
+      const retrievalDone = this.beginStep(id, 'tool', '检索历史记忆');
+      const memories = retrieveMemories(this.store.memories(contact.id), gate.keywords, Date.now());
+      retrievalDone(`匹配 ${memories.length} 条历史记忆（含时间衰减排序）`);
+      const result = await this.callAi(
         id,
-        '建议必要性判断',
-        prompts.gate,
-        context,
-        gateResultSchema,
+        '详细建议生成',
+        prompts.advice,
+        { ...context, memories, gate },
+        adviceResultSchema,
         controller,
       );
       if (!this.valid(id, controller)) return;
-      if (!gate.needed) {
-        this.skip(id, '详细建议生成', '模型判断当前无需建议，原因已保存到判断记录');
-        this.recordDecision(id, false, gate.reason, '', trigger, []);
-      } else {
-        const retrievalDone = this.beginStep(id, 'tool', '检索历史记忆');
-        const memories = retrieveMemories(
-          this.store.memories(contact.id),
-          gate.keywords,
-          Date.now(),
-        );
-        retrievalDone(`匹配 ${memories.length} 条历史记忆（含时间衰减排序）`);
-        const result = await this.callAi(
-          id,
-          '详细建议生成',
-          prompts.advice,
-          { ...context, memories, gate },
-          adviceResultSchema,
-          controller,
-        );
-        if (!this.valid(id, controller)) return;
-        this.recordDecision(
-          id,
-          true,
-          `${gate.reason}\n\n${result.analysis}`,
-          result.advice,
-          trigger,
-          memories.map((memory) => memory.id),
-        );
-      }
-    }
-    if (trigger === '对话静默' || threshold || significant || trigger === '手动检查') {
-      await this.consolidatePending(id, controller);
+      this.recordDecision(
+        id,
+        true,
+        `${gate.reason}\n\n${result.analysis}`,
+        result.advice,
+        trigger,
+        memories.map((memory) => memory.id),
+      );
     }
   }
+
   private async consolidatePending(id: string, controller: AbortController): Promise<void> {
     while (this.valid(id, controller)) {
       const conversation = this.store.conversation(id)!;
@@ -510,7 +537,6 @@ export class AnalysisEngine {
       advice,
       trigger,
       memoryIds,
-      adopted: false,
     });
     this.store.saveConversation({
       ...conversation,

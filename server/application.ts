@@ -85,7 +85,9 @@ export class Application {
       self: this.store.self,
       settings: this.store.settings,
       contacts: this.store.contacts(),
-      conversations: this.store.conversations(),
+      conversations: this.store
+        .conversations()
+        .map(({ summary: _summary, ...conversation }) => conversation),
       hasApiKey: Boolean(this.store.secret('apiKey')),
       hasQqToken: Boolean(this.store.secret('qqToken')),
       bridge: {

@@ -431,12 +431,13 @@ export function SettingsForm({
         </Field>
         <h3>分析节奏</h3>
         <p className="muted small">
-          合并窗口用于延后摘要与情绪分析；累计条数和静默时间用于触发“是否需要建议”的判断。
+          摘要、建议判断和画像与记忆归纳独立累计消息；达到条数阈值直接检查，少量消息等待静默。摘要仅供后台
+          AI 使用。
         </p>
         <div className="two-col">
           <Field
             label="消息合并窗口（秒）"
-            hint="默认 3 秒；新消息会重新开始计时，合并后统一分析。"
+            hint="默认 60 秒；新消息重新计时，达到条数阈值可提前检查。"
           >
             <input
               type="number"
@@ -475,14 +476,54 @@ export function SettingsForm({
               }
             />
           </Field>
-          <Field label="采用建议后的冷却（分钟）">
+          <Field label="摘要分析累计消息数（条）">
             <input
               type="number"
-              min={1}
-              max={1440}
-              value={settings.cooldownMinutes}
+              required
+              min={2}
+              max={200}
+              value={settings.summaryMessageThreshold}
               onChange={(event) =>
-                setSettings({ ...settings, cooldownMinutes: Number(event.target.value) })
+                setSettings({ ...settings, summaryMessageThreshold: Number(event.target.value) })
+              }
+            />
+          </Field>
+          <Field label="摘要分析静默时间（秒）">
+            <input
+              type="number"
+              required
+              min={5}
+              max={3600}
+              value={settings.summaryIdleSeconds}
+              onChange={(event) =>
+                setSettings({ ...settings, summaryIdleSeconds: Number(event.target.value) })
+              }
+            />
+          </Field>
+          <Field label="画像与记忆归纳累计消息数（条）">
+            <input
+              type="number"
+              required
+              min={2}
+              max={1000}
+              value={settings.consolidationMessageThreshold}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  consolidationMessageThreshold: Number(event.target.value),
+                })
+              }
+            />
+          </Field>
+          <Field label="画像与记忆归纳静默时间（秒）">
+            <input
+              type="number"
+              required
+              min={5}
+              max={86400}
+              value={settings.consolidationIdleSeconds}
+              onChange={(event) =>
+                setSettings({ ...settings, consolidationIdleSeconds: Number(event.target.value) })
               }
             />
           </Field>

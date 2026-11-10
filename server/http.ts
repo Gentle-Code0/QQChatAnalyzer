@@ -198,29 +198,6 @@ export function createApi(application: Application, password: string) {
     application.engine.flush(String(request.params.id));
     response.status(202).json({ ok: true });
   });
-  app.post('/api/conversations/:id/adopt/:decisionId', (request, response) => {
-    const conversation = store.conversation(String(request.params.id));
-    if (!conversation) {
-      response.sendStatus(404);
-      return;
-    }
-    const decision = store
-      .decisions(conversation.id)
-      .find((item) => item.id === request.params.decisionId);
-    if (!decision || !decision.needed) {
-      response.sendStatus(404);
-      return;
-    }
-    // Cancelling a running advice job prevents an older response from bypassing the newly set cooldown.
-    application.engine.cancel(conversation.id, '已采用建议，重新安排冷却期间分析');
-    store.saveDecision({ ...decision, adopted: true });
-    store.saveConversation({
-      ...conversation,
-      adoptedUntil: Date.now() + store.settings.cooldownMinutes * 60000,
-    });
-    application.engine.notify(conversation.id);
-    response.json({ ok: true });
-  });
   const handleError: ErrorRequestHandler = (error: unknown, _request, response, _next) => {
     if (error instanceof z.ZodError) {
       response.status(400).json({ error: '输入不符合要求，请检查字段内容' });

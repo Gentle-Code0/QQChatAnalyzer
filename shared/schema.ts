@@ -45,7 +45,6 @@ export const conversationSchema = z.object({
   lastDecisionSequence: z.number().default(0),
   consolidatedSequence: z.number().default(0),
   lastMessageAt: z.number().default(0),
-  adoptedUntil: z.number().default(0),
   status: z.string().default('等待消息'),
   error: z.string().default(''),
 });
@@ -103,7 +102,6 @@ export const decisionSchema = z.object({
   needed: z.boolean(),
   reason: z.string(),
   advice: z.string(),
-  adopted: z.boolean().default(false),
   trigger: z.string(),
   memoryIds: z.array(z.string()).default([]),
 });
@@ -118,10 +116,13 @@ export const settingsSchema = z
       .string()
       .regex(/^$|^\d{5,15}$/)
       .default(''),
-    messageThreshold: z.number().int().min(2).max(200).default(20),
-    mergeWindowSeconds: z.number().min(0.1).max(60).default(3),
-    idleSeconds: z.number().int().min(5).max(600).default(15),
-    cooldownMinutes: z.number().int().min(1).max(1440).default(1),
+    messageThreshold: z.number().int().min(2).max(200).default(30),
+    mergeWindowSeconds: z.number().min(0.1).max(60).default(60),
+    idleSeconds: z.number().int().min(5).max(600).default(120),
+    summaryMessageThreshold: z.number().int().min(2).max(200).default(20),
+    summaryIdleSeconds: z.number().int().min(5).max(3600).default(60),
+    consolidationMessageThreshold: z.number().int().min(2).max(1000).default(100),
+    consolidationIdleSeconds: z.number().int().min(5).max(86400).default(600),
     historyPages: z.number().int().min(1).max(200).default(20),
   })
   .transform(({ model, fullModel, lightModel, ...settings }) => ({
@@ -160,7 +161,7 @@ export type Settings = z.infer<typeof settingsSchema>;
 export interface Snapshot {
   self: SelfProfile;
   contacts: Contact[];
-  conversations: Conversation[];
+  conversations: Omit<Conversation, 'summary'>[];
   settings: Settings;
   hasApiKey: boolean;
   hasQqToken: boolean;

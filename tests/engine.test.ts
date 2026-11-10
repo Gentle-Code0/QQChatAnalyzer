@@ -49,14 +49,18 @@ function watcher(predicate: () => boolean) {
   };
 }
 
-for (const mergeWindowSeconds of [3, 7]) {
+for (const mergeWindowSeconds of [5, 7]) {
   test(
     `合并窗口为 ${mergeWindowSeconds} 秒时，后续消息重新计时并统一摘要分析`,
     { timeout: 5000 },
     async (context) => {
       context.mock.timers.enable({ apis: ['setTimeout'] });
       const data = fixture();
-      data.store.settings = { ...data.store.settings, mergeWindowSeconds };
+      data.store.settings = {
+        ...data.store.settings,
+        mergeWindowSeconds,
+        summaryIdleSeconds: mergeWindowSeconds,
+      };
       const summarized = watcher(
         () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
       );
@@ -90,7 +94,12 @@ for (const mergeWindowSeconds of [3, 7]) {
 test('自定义累计阈值达到 3 条时触发建议必要性判断', { timeout: 5000 }, async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
   const data = fixture();
-  data.store.settings = { ...data.store.settings, messageThreshold: 3 };
+  data.store.settings = {
+    ...data.store.settings,
+    messageThreshold: 3,
+    summaryMessageThreshold: 2,
+    consolidationMessageThreshold: 3,
+  };
   const summarized = watcher(
     () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
   );
@@ -172,7 +181,7 @@ test('需要建议时先通过必要性判断，再检索历史并保存完整�
 test('历史归纳保留可核验来源，并不生成建议', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(
-    () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+    () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
   );
   const message = { ...data.message('history-1'), source: 'history' as const };
   const memory = {
@@ -250,7 +259,7 @@ test(
     const summarized = watcher(
       () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
     );
-    const completed = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
+    const completed = watcher(() => data.store.decisions(data.conversation.id).length > 0);
     const ai = new FakeAi((instruction) =>
       instruction === prompts.summary
         ? light
@@ -391,19 +400,26 @@ test('对象暂停时完全禁止 AI 调用', async () => {
   }
 });
 
-test('采用建议后的冷却保留摘要更新，跳过重复建议判断', { timeout: 5000 }, async () => {
+test('旧数据的采纳冷却不再阻止建议判断', { timeout: 5000 }, async () => {
   const data = fixture();
   const watched = watcher(() => data.store.contact(data.contact.id)!.traitsRevision > 0);
-  const ai = new FakeAi((instruction) => (instruction === prompts.summary ? light : consolidation));
+  const ai = new FakeAi((instruction) =>
+    instruction === prompts.summary
+      ? light
+      : instruction === prompts.gate
+        ? { needed: false, reason: '普通聊天', keywords: [] }
+        : consolidation,
+  );
   const engine = new AnalysisEngine(data.store, ai, watched.changed);
   try {
-    data.store.saveConversation({ ...data.conversation, adoptedUntil: Date.now() + 60000 });
+    data.store.saveConversation({ ...data.conversation, ...{ adoptedUntil: Date.now() + 60000 } });
     data.store.addMessage(data.message('1'));
     engine.flush(data.conversation.id);
     await watched.promise;
-    assert.match(data.store.decisions(data.conversation.id)[0]?.reason ?? '', /冷却/);
-    assert.equal(data.store.conversation(data.conversation.id)?.summary, light.summary);
-    assert.equal(ai.calls.includes(prompts.gate), false);
+    assert.equal(data.store.decisions(data.conversation.id)[0]?.reason, '普通聊天');
+    assert.equal(ai.calls.includes(prompts.gate), true);
+    assert.equal('adoptedUntil' in data.store.conversation(data.conversation.id)!, false);
+    assert.equal('adopted' in data.store.decisions(data.conversation.id)[0]!, false);
   } finally {
     await engine.stop();
     data.cleanup();
@@ -527,7 +543,7 @@ for (const kind of ['private', 'group'] as const) {
           assert.equal(data.store.contact(data.contact.id)?.traitsRevision, 0);
           assert.equal(data.store.memories(data.contact.id).length, 0);
           assert.equal(data.store.conversation(data.conversation.id)?.consolidatedSequence, 0);
-          assert.equal(data.store.conversation(data.conversation.id)?.processedSequence, 0);
+          assert.ok(data.store.conversation(data.conversation.id)!.processedSequence > 0);
           retry = true;
           engine.flush(data.conversation.id);
           await completed.promise;
@@ -777,3 +793,234 @@ test('未知分析异常不向页面暴露原始聊天或密钥', { timeout: 500
     data.cleanup();
   }
 });
+
+test(
+  '默认少量消息分别在静默 60、120、600 秒触发三个阶段，且不重复调用',
+  { timeout: 5000 },
+  async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    const summarized = watcher(
+      () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+    );
+    const decided = watcher(() => data.store.decisions(data.conversation.id).length > 0);
+    const consolidated = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence > 0,
+    );
+    const ai = new FakeAi((instruction) =>
+      instruction === prompts.summary
+        ? light
+        : instruction === prompts.gate
+          ? { needed: false, reason: '普通聊天，无需建议', keywords: [] }
+          : consolidation,
+    );
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      summarized.changed();
+      decided.changed();
+      consolidated.changed();
+    });
+    try {
+      data.store.addMessage(data.message('1'));
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(59999);
+      assert.deepEqual(ai.calls, []);
+      context.mock.timers.tick(1);
+      await summarized.promise;
+      assert.deepEqual(ai.calls, [prompts.summary]);
+      assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 0);
+      context.mock.timers.tick(60000);
+      await decided.promise;
+      assert.deepEqual(ai.calls, [prompts.summary, prompts.gate]);
+      assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 0);
+      context.mock.timers.tick(480000);
+      await consolidated.promise;
+      assert.deepEqual(ai.calls, [prompts.summary, prompts.gate, prompts.consolidate]);
+      context.mock.timers.tick(3600000);
+      await engine.stop();
+      assert.equal(ai.calls.length, 3);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  },
+);
+
+test(
+  '持续聊天到第 20 条直接更新摘要，不等待 60 秒合并，也不提前归纳',
+  { timeout: 5000 },
+  async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    const summarized = watcher(
+      () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+    );
+    const ai = new FakeAi(() => light);
+    const engine = new AnalysisEngine(data.store, ai, summarized.changed);
+    try {
+      for (let index = 1; index <= 19; index++) {
+        data.store.addMessage(data.message(String(index)));
+        engine.notify(data.conversation.id);
+        context.mock.timers.tick(1000);
+      }
+      assert.deepEqual(ai.calls, []);
+      data.store.addMessage(data.message('20'));
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(0);
+      await summarized.promise;
+      assert.deepEqual(ai.calls, [prompts.summary]);
+      assert.equal(data.store.decisions(data.conversation.id).length, 0);
+      assert.equal(data.store.conversation(data.conversation.id)!.consolidatedSequence, 0);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  },
+);
+
+test(
+  '归纳 100 条阈值跨越 60 条分页，历史归纳不触发建议且逐页保存检查点',
+  { timeout: 5000 },
+  async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    data.store.settings = { ...data.store.settings, summaryMessageThreshold: 200 };
+    const completed = watcher(
+      () => data.store.conversation(data.conversation.id)!.consolidatedSequence >= 100,
+    );
+    const batches: number[] = [];
+    const ai = new FakeAi((instruction, _signal, payload) => {
+      if (instruction === prompts.summary) return light;
+      assert.equal(instruction, prompts.consolidate);
+      batches.push(z.object({ messages: z.array(z.unknown()) }).parse(payload).messages.length);
+      return {
+        traits: data.contact.traits,
+        traitSourceIds: { likes: [], boundaries: [], communication: [] },
+        memories: [],
+      };
+    });
+    const engine = new AnalysisEngine(data.store, ai, completed.changed);
+    try {
+      for (let index = 1; index <= 100; index++)
+        data.store.addMessage({ ...data.message(String(index)), source: 'history' });
+      engine.notify(data.conversation.id, false);
+      context.mock.timers.tick(0);
+      await completed.promise;
+      assert.deepEqual(batches, [60, 40]);
+      assert.equal(ai.calls.filter((instruction) => instruction === prompts.summary).length, 2);
+      assert.equal(data.store.decisions(data.conversation.id).length, 0);
+      assert.equal(data.store.conversation(data.conversation.id)!.processedSequence, 100);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  },
+);
+
+test(
+  '较短合并窗口不会绕过摘要节流，后续消息会重置所有静默计时',
+  { timeout: 5000 },
+  async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    data.store.settings = { ...data.store.settings, mergeWindowSeconds: 3 };
+    const merged = watcher(
+      () => engine.activity(data.conversation.id).at(-1)?.status === 'completed',
+    );
+    const summarized = watcher(
+      () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+    );
+    const ai = new FakeAi(() => light);
+    const engine = new AnalysisEngine(data.store, ai, () => {
+      merged.changed();
+      summarized.changed();
+    });
+    try {
+      data.store.addMessage(data.message('1'));
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(3000);
+      await merged.promise;
+      assert.deepEqual(ai.calls, []);
+      context.mock.timers.tick(56000);
+      data.store.addMessage(data.message('2'));
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(59999);
+      assert.deepEqual(ai.calls, []);
+      context.mock.timers.tick(1);
+      await summarized.promise;
+      assert.deepEqual(ai.calls, [prompts.summary]);
+      assert.equal(data.store.observations(data.conversation.id)[0]?.sourceIds.length, 2);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  },
+);
+
+test('静默计时到期等待在途摘要，不取消或重复摘要请求', { timeout: 5000 }, async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const data = fixture();
+  const response = deferred<unknown>();
+  const started = deferred<AbortSignal>();
+  const decided = watcher(() => data.store.decisions(data.conversation.id).length > 0);
+  const ai = new FakeAi((instruction, signal) => {
+    if (instruction === prompts.summary) {
+      started.resolve(signal);
+      return response.promise;
+    }
+    assert.equal(instruction, prompts.gate);
+    return { needed: false, reason: '无需建议', keywords: [] };
+  });
+  const engine = new AnalysisEngine(data.store, ai, decided.changed);
+  try {
+    data.store.addMessage(data.message('1'));
+    engine.notify(data.conversation.id);
+    context.mock.timers.tick(60000);
+    const signal = await started.promise;
+    context.mock.timers.tick(60000);
+    assert.equal(signal.aborted, false);
+    assert.deepEqual(ai.calls, [prompts.summary]);
+    response.resolve(light);
+    await decided.promise;
+    assert.deepEqual(ai.calls, [prompts.summary, prompts.gate]);
+  } finally {
+    response.resolve(light);
+    await engine.stop();
+    context.mock.timers.reset();
+    data.cleanup();
+  }
+});
+
+for (const pause of ['contact', 'conversation'] as const) {
+  test(`暂停 ${pause} 清理三个静默计时，恢复后可处理积压`, { timeout: 5000 }, async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout'] });
+    const data = fixture();
+    const summarized = watcher(
+      () => data.store.conversation(data.conversation.id)!.processedSequence > 0,
+    );
+    const ai = new FakeAi(() => light);
+    const engine = new AnalysisEngine(data.store, ai, summarized.changed);
+    try {
+      data.store.addMessage(data.message('1'));
+      engine.notify(data.conversation.id);
+      if (pause === 'contact') data.store.saveContact({ ...data.contact, paused: true });
+      else data.store.saveConversation({ ...data.conversation, paused: true });
+      engine.cancel(data.conversation.id);
+      context.mock.timers.tick(3600000);
+      assert.deepEqual(ai.calls, []);
+      if (pause === 'contact') data.store.saveContact({ ...data.contact, paused: false });
+      else data.store.saveConversation({ ...data.conversation, paused: false });
+      engine.notify(data.conversation.id);
+      context.mock.timers.tick(60000);
+      await summarized.promise;
+      assert.deepEqual(ai.calls, [prompts.summary]);
+    } finally {
+      await engine.stop();
+      context.mock.timers.reset();
+      data.cleanup();
+    }
+  });
+}

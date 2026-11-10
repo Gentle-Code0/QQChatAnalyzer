@@ -49,10 +49,22 @@ test(
       const cookie = login.headers.get('set-cookie')?.split(';')[0];
       assert.ok(cookie);
       assert.match(login.headers.get('set-cookie') ?? '', /HttpOnly/);
+      data.store.saveConversation({ ...data.conversation, summary: 'invalid-internal-summary' });
       const state = await fetch(`${base}/api/state`, { headers: { Cookie: cookie } });
       const body = await state.text();
       assert.equal(state.status, 200);
       assert.equal(body.includes('invalid-api-test-key'), false);
+      assert.equal(body.includes('invalid-internal-summary'), false);
+      assert.equal(body.includes('"summary"'), false);
+      assert.equal(
+        (
+          await fetch(`${base}/api/conversations/${data.conversation.id}/adopt/old`, {
+            method: 'POST',
+            headers: { Cookie: cookie },
+          })
+        ).status,
+        404,
+      );
       assert.match(body, /"hasApiKey":true/);
       data.store.addMessage({ ...data.message('new'), time: 3000 });
       data.store.addMessage({ ...data.message('old'), time: 1000, source: 'history' });
@@ -78,7 +90,10 @@ test(
         mergeWindowSeconds: 4.5,
         messageThreshold: 12,
         idleSeconds: 25,
-        cooldownMinutes: 1,
+        summaryMessageThreshold: 25,
+        summaryIdleSeconds: 70,
+        consolidationMessageThreshold: 110,
+        consolidationIdleSeconds: 700,
       };
       const saved = await fetch(`${base}/api/settings`, {
         method: 'PUT',

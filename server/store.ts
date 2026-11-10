@@ -187,6 +187,15 @@ export class Store {
         messageSchema.parse({ ...JSON.parse(String(row.data)), sequence: Number(row.sequence) }),
       );
   }
+  pendingMessageCount(conversationId: string, afterSequence: number, liveOnly = false): number {
+    const row = this.database
+      .prepare(
+        'SELECT COUNT(*) AS count FROM messages WHERE conversation_id=? AND sequence>?' +
+          (liveOnly ? " AND json_extract(data, '$.source')='live'" : ''),
+      )
+      .get(conversationId, afterSequence);
+    return Number(row?.count ?? 0);
+  }
   messageCount(conversationId: string): number {
     return Number(
       this.database

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Contact, Conversation, ConversationDetail, Snapshot } from '../shared/schema';
+import type { Contact, ConversationDetail, Snapshot } from '../shared/schema';
 import { formatTime } from './api';
 import { ActivityPanel } from './activity';
 
@@ -14,7 +14,7 @@ export function Workspace({
 }: {
   state: Snapshot;
   contact: Contact;
-  conversation?: Conversation;
+  conversation?: Snapshot['conversations'][number];
   detail?: ConversationDetail;
   selectConversation: (id: string) => void;
   edit: () => void;
@@ -105,16 +105,6 @@ export function Workspace({
       )}
       <div className="workspace-grid">
         <div className="main-column">
-          <section className="panel summary">
-            <div className="section-heading">
-              <h3>当前对话摘要</h3>
-              <span className="pill soft">持续增量更新</span>
-            </div>
-            <p className="prewrap">
-              {conversation?.summary ||
-                '等待聊天记录与 AI 分析。新消息到来时，会以最近一次有效摘要继续更新。'}
-            </p>
-          </section>
           {latestDecision && (
             <section className="panel advice-panel" aria-live="polite">
               <div className="section-heading">
@@ -137,16 +127,6 @@ export function Workspace({
               )}
               <div className="section-heading">
                 <small className="muted">{formatTime(latestDecision.time)}</small>
-                {latestDecision.needed && conversation && (
-                  <button
-                    disabled={latestDecision.adopted}
-                    onClick={() =>
-                      void action(`/conversations/${conversation.id}/adopt/${latestDecision.id}`)
-                    }
-                  >
-                    {latestDecision.adopted ? '已采用 · 冷却中' : '已采用这条建议'}
-                  </button>
-                )}
               </div>
             </section>
           )}
@@ -246,16 +226,6 @@ export function Workspace({
                       </div>
                       <p className="prewrap">{decision.reason}</p>
                       {decision.advice && <blockquote>{decision.advice}</blockquote>}
-                      {decision.needed && conversation && (
-                        <button
-                          disabled={decision.adopted}
-                          onClick={() =>
-                            void action(`/conversations/${conversation.id}/adopt/${decision.id}`)
-                          }
-                        >
-                          {decision.adopted ? '已采用 · 暂停重复提醒' : '已采用这条建议'}
-                        </button>
-                      )}
                     </article>
                   ))
                 ) : (
@@ -321,9 +291,6 @@ export function Workspace({
             <div className="eyebrow">A LITTLE SPACE</div>
             <h3>给对话一点呼吸</h3>
             <p>平时持续观察，只在有必要时提醒。理解一段关系，需要上下文，也需要耐心。</p>
-            {conversation && conversation.adoptedUntil > Date.now() && (
-              <span className="pill">建议冷却至 {formatTime(conversation.adoptedUntil)}</span>
-            )}
           </section>
         </aside>
       </div>

@@ -9,11 +9,26 @@ import { retrieveMemories } from '../server/engine.js';
 import type { Memory } from '../shared/schema.js';
 import { settingsSchema } from '../shared/schema.js';
 
-test('新设置默认合并 3 秒、冷却 1 分钟，已有显式冷却配置保留', () => {
+test('独立调度默认值及旧设置兼容，退休的冷却设置被忽略', () => {
   const defaults = settingsSchema.parse({});
-  assert.equal(defaults.mergeWindowSeconds, 3);
-  assert.equal(defaults.cooldownMinutes, 1);
-  assert.equal(settingsSchema.parse({ cooldownMinutes: 10 }).cooldownMinutes, 10);
+  assert.equal(defaults.mergeWindowSeconds, 60);
+  assert.equal(defaults.idleSeconds, 120);
+  assert.equal(defaults.messageThreshold, 30);
+  assert.equal(defaults.summaryMessageThreshold, 20);
+  assert.equal(defaults.summaryIdleSeconds, 60);
+  assert.equal(defaults.consolidationMessageThreshold, 100);
+  assert.equal(defaults.consolidationIdleSeconds, 600);
+  const legacy = settingsSchema.parse({
+    mergeWindowSeconds: 3,
+    idleSeconds: 15,
+    messageThreshold: 12,
+    cooldownMinutes: 10,
+  });
+  assert.equal(legacy.mergeWindowSeconds, 3);
+  assert.equal(legacy.idleSeconds, 15);
+  assert.equal(legacy.messageThreshold, 12);
+  assert.equal(legacy.summaryMessageThreshold, 20);
+  assert.equal('cooldownMinutes' in legacy, false);
 });
 
 test('密钥加密落盘，重新打开后可解密；消息按会话去重', () => {
@@ -109,7 +124,7 @@ test('单模型设置兼容旧配置且优先保留显式模型名称', () => {
     cooldownMinutes: 10,
   });
   assert.equal(migrated.model, 'custom-vision');
-  assert.equal(migrated.cooldownMinutes, 10);
+  assert.equal('cooldownMinutes' in migrated, false);
   assert.equal('lightModel' in migrated, false);
   assert.equal('fullModel' in migrated, false);
   assert.equal(settingsSchema.parse({ lightModel: 'only-legacy' }).model, 'only-legacy');
