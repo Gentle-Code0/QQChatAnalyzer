@@ -35,13 +35,14 @@ export function createApi(application: Application, password: string) {
     response.json({ ok: true });
   });
   app.put('/api/settings', (request, response) => {
-    const input = settingsSchema.parse(request.body);
+    const input = settingsSchema.parse({ ...store.settings, ...request.body });
     const secrets = z
       .object({ apiKey: z.string().max(4000).optional(), qqToken: z.string().max(4000).optional() })
       .parse(request.body);
     validateEndpoint(input.baseUrl, ['https:', 'http:']);
+    if (input.napcatUrl) validateEndpoint(input.napcatUrl, ['ws:', 'wss:']);
     if (input.qqUrl) validateEndpoint(input.qqUrl, ['ws:', 'wss:']);
-    if (input.qqUrl && !input.selfQq) {
+    if ((input.bridgeProvider === 'napcat' ? input.napcatUrl : input.qqUrl) && !input.selfQq) {
       response.status(400).json({ error: '配置 QQ 地址时必须填写自身 QQ 号码' });
       return;
     }
@@ -56,12 +57,18 @@ export function createApi(application: Application, password: string) {
       return;
     }
     const reconnect =
+      input.bridgeProvider !== store.settings.bridgeProvider ||
+      input.napcatUrl !== store.settings.napcatUrl ||
       input.qqUrl !== store.settings.qqUrl ||
       input.selfQq !== store.settings.selfQq ||
       secrets.qqToken !== undefined;
     store.settings = settingsSchema.parse(input);
     if (secrets.apiKey !== undefined) store.setSecret('apiKey', secrets.apiKey);
-    if (secrets.qqToken !== undefined) store.setSecret('qqToken', secrets.qqToken);
+    if (secrets.qqToken !== undefined)
+      store.setSecret(
+        input.bridgeProvider === 'napcat' ? 'napcatToken' : 'qqToken',
+        secrets.qqToken,
+      );
     if (reconnect) application.reconnect();
     for (const conversation of store.conversations())
       application.engine.notify(conversation.id, false);

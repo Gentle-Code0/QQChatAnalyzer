@@ -161,67 +161,34 @@ test('数组与 CQ 字符串均保留图片、表情包与文字的原始顺序'
   ]);
 });
 
-test('只读取图获取 URL，取消或停止取图后拒绝在途请求', { timeout: 5000 }, async () => {
-  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-  await once(server, 'listening');
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
-  const ready = deferred<void>();
-  const waiting = deferred<void>();
-  const stopping = deferred<void>();
-  const actions: string[] = [];
-  server.on('connection', (socket) =>
-    socket.on('message', (bytes) => {
-      const request = z
-        .object({ action: z.string(), params: z.record(z.unknown()), echo: z.string() })
-        .parse(JSON.parse(bytes.toString()));
-      actions.push(request.action);
-      if (request.params.file === 'waiting') {
-        waiting.resolve();
-        return;
-      }
-      if (request.params.file === 'stopping') {
-        stopping.resolve();
-        return;
-      }
-      const data =
-        request.action === 'get_login_info'
-          ? { user_id: 10001 }
-          : { url: `https://example.invalid/${request.params.file}?rkey=refreshed` };
-      socket.send(JSON.stringify({ retcode: 0, data, echo: request.echo }));
-    }),
-  );
+test('图片只使用消息 HTTP URL，不调用桥接下载或读取本地路径', async () => {
   const bridge = new QqBridge({
-    url: `ws://127.0.0.1:${address.port}`,
-    token: '',
+    url: 'ws://example.invalid',
     selfQq: '10001',
-    onConnected: async () => ready.resolve(),
+    token: '',
+    onConnected: async () => {},
     onStatus: () => {},
     onMessage: () => {},
   });
-  try {
-    bridge.start();
-    await ready.promise;
-    assert.equal(
-      await bridge.imageUrl({ type: 'image', file: 'one.png' }, new AbortController().signal),
-      'https://example.invalid/one.png?rkey=refreshed',
-    );
-    const controller = new AbortController();
-    const pending = bridge.imageUrl({ type: 'image', file: 'waiting' }, controller.signal);
-    await waiting.promise;
-    controller.abort();
-    await assert.rejects(pending, /已取消/);
-    const stopped = bridge.imageUrl(
-      { type: 'image', file: 'stopping' },
+  assert.equal(
+    await bridge.imageUrl(
+      { type: 'image', file: 'one.png', url: 'https://example.invalid/one' },
       new AbortController().signal,
-    );
-    await stopping.promise;
-    bridge.stop();
-    await assert.rejects(stopped, /已停止/);
-    assert.deepEqual(actions, ['get_login_info', 'get_image', 'get_image', 'get_image']);
-  } finally {
-    bridge.stop();
-    for (const socket of server.clients) socket.terminate();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
+    ),
+    'https://example.invalid/one',
+  );
+  await assert.rejects(
+    bridge.imageUrl({ type: 'image', file: 'one.png' }, new AbortController().signal),
+    /没有可下载/,
+  );
+  await assert.rejects(
+    bridge.imageUrl({ type: 'image', url: 'file:///private.png' }, new AbortController().signal),
+    /URL 无效/,
+  );
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    bridge.imageUrl({ type: 'image', url: 'https://example.invalid/one' }, controller.signal),
+    { name: 'AbortError' },
+  );
 });

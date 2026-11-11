@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { imageAnalysisSchema, type ImageAnalysis } from '../shared/schema.js';
 
 export const imageCachePolicy = {
-  maxBytes: 100_000_000,
+  maxBytes: 200_000_000,
   maxIdleMs: 30 * 86400000,
   cleanupIntervalMs: 3600000,
 };

@@ -99,6 +99,10 @@ export class ImageAnalysisService {
           const image = imageSegmentSchema.parse(segment);
           const analysis = await this.resolve(message, segmentIndex, image, requestSignal, report);
           requestSignal.throwIfAborted();
+          if (!analysis) {
+            segments.push({ type: 'text', text: '[图片无法下载或超限，未分析]' });
+            continue;
+          }
           segments.push({ ...image, analysis });
           imageEvidence.push({
             messageId: message.id,
@@ -125,7 +129,7 @@ export class ImageAnalysisService {
     image: ImageSegment,
     signal: AbortSignal,
     report?: ProgressReporter,
-  ): Promise<ImageAnalysis> {
+  ): Promise<ImageAnalysis | undefined> {
     const { cache, configuration, resolveImage } = this.dependencies;
     const { account, model } = configuration();
     const aliasKey = digest(image.file ? `file:${image.file}` : `url:${image.url ?? ''}`);
@@ -141,25 +145,22 @@ export class ImageAnalysisService {
       return reused;
     }
     const candidate = cache.candidate(account, aliasKey);
-    const resolved = beginProgress(
-      report,
-      'tool',
-      image.file ? 'get_image · 读取图片地址' : '读取消息图片地址',
-    );
+    const resolved = beginProgress(report, 'tool', '读取并下载消息图片 URL');
     let url: string;
+    let bytes: Buffer;
     try {
       url = await resolveImage(image, signal);
+      signal.throwIfAborted();
+      bytes = await (this.dependencies.download ?? downloadQqImage)(url, signal);
+      signal.throwIfAborted();
+      if (!bytes.length || bytes.length > MAX_IMAGE_DOWNLOAD_BYTES) throw new Error('图片下载超限');
+      resolved();
     } catch {
       signal.throwIfAborted();
-      throw new ImageContextError('无法读取消息图片，请检查 QQ 连接或图片是否过期，然后重新检查。');
+      resolved('图片下载不可用；保留占位符，未还原图片或调用其他下载接口');
+      return undefined;
     }
-    signal.throwIfAborted();
-    resolved();
-    const hashed = beginProgress(report, 'tool', '下载原文件并核验 SHA-256');
-    const bytes = await (this.dependencies.download ?? downloadQqImage)(url, signal);
-    signal.throwIfAborted();
-    if (!bytes.length || bytes.length > MAX_IMAGE_DOWNLOAD_BYTES)
-      throw new ImageContextError('QQ 图片为空或超过单张 10 MiB 限制。');
+    const hashed = beginProgress(report, 'tool', '核验下载文件 SHA-256');
     if (configuration().account !== account)
       throw new ImageContextError('图片分析期间账号发生变化，请重新检查。');
     const sha256 = digest(bytes);

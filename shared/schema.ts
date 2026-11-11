@@ -49,9 +49,20 @@ export const contactSchema = contactInputSchema.extend({
   historyCursor: z.number().int().default(0),
   historyDone: z.boolean().default(false),
 });
+export const bridgeProviderSchema = z.enum(['snowluma', 'napcat']);
+export type BridgeProvider = z.infer<typeof bridgeProviderSchema>;
+export const upstreamIdentitySchema = z.object({
+  provider: bridgeProviderSchema,
+  account: z.string(),
+  id: z.string(),
+  groupSequence: z.string().optional(),
+  rawSequence: z.string().optional(),
+});
 export const historySyncSchema = z.object({
   conversationId: z.string(),
   accountId: z.string(),
+  provider: bridgeProviderSchema.default('snowluma'),
+  recoveryCount: z.number().int().default(0),
   initialCursor: z.number().int().default(0),
   initialDone: z.boolean().default(false),
   recoveryPending: z.boolean().default(false),
@@ -121,6 +132,11 @@ export const messageSchema = z.object({
   time: z.number(),
   sequence: z.number().default(0),
   source: z.enum(['live', 'history']),
+  identities: z.array(upstreamIdentitySchema).max(20).optional(),
+  associations: z
+    .array(z.object({ id: z.string(), evidence: z.enum(['content-time', 'ambiguous']) }))
+    .max(20)
+    .optional(),
   mentionedSelf: z.boolean().default(false),
 });
 export const memorySchema = z.object({
@@ -162,6 +178,8 @@ export const settingsSchema = z
     model: z.string().trim().min(1).max(100).optional(),
     fullModel: z.string().trim().min(1).max(100).optional(),
     lightModel: z.string().trim().min(1).max(100).optional(),
+    bridgeProvider: bridgeProviderSchema.default('snowluma'),
+    napcatUrl: z.string().max(500).default(''),
     qqUrl: z.string().max(500).default(''),
     selfQq: z
       .string()
@@ -216,6 +234,7 @@ export interface Snapshot {
   settings: Settings;
   hasApiKey: boolean;
   hasQqToken: boolean;
+  hasNapcatToken?: boolean;
   bridge: {
     connected: boolean;
     status: string;
