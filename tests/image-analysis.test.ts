@@ -228,7 +228,9 @@ test('服务重建及数据库重启后原消息可离线复用；新账号不�
       analyzeImage: async () => result,
     });
     try {
-      await assert.rejects(other.prepareContext(context('one'), signal()), /无法读取消息图片/);
+      const unavailable = await other.prepareContext(context('one'), signal());
+      assert.equal(unavailable.imageEvidence.length, 0);
+      assert.match(JSON.stringify(unavailable.context), /图片无法下载/);
     } finally {
       other.stop();
     }
@@ -457,6 +459,45 @@ test('缓存到期后相同消息重新下载分析，不把过期结果作为�
     assert.equal(analyses, 2);
   } finally {
     images.stop();
+    data.cleanup();
+  }
+});
+
+test('failed and oversized downloads become placeholders without restoration or model calls', async () => {
+  const data = fixture();
+  let modelCalls = 0;
+  try {
+    for (const mode of ['failed', 'oversized']) {
+      const images = new ImageAnalysisService({
+        cache: data.store.imageCache,
+        configuration: () => ({ account: '10001', model: 'invalid-test-model' }),
+        resolveImage: async (image) => image.url!,
+        download: async () => {
+          if (mode === 'failed') throw new Error('invalid test download');
+          return Buffer.alloc(10 * 1024 * 1024 + 1);
+        },
+        analyzeImage: async () => {
+          modelCalls++;
+          return result;
+        },
+      });
+      try {
+        const prepared = await images.prepareContext(context(mode), signal());
+        assert.equal(prepared.imageEvidence.length, 0);
+        const parsed = contextSchema.parse(prepared.context);
+        assert.deepEqual(parsed.messages?.[0]?.segments, [
+          { type: 'text', text: '前文' },
+          { type: 'text', text: '[图片无法下载或超限，未分析]' },
+          { type: 'text', text: '后文' },
+        ]);
+      } finally {
+        images.stop();
+      }
+    }
+    assert.equal(modelCalls, 0);
+    assert.equal(data.store.imageCache.size(), 0);
+    assert.equal(imageCachePolicy.maxBytes, 200_000_000);
+  } finally {
     data.cleanup();
   }
 });
