@@ -1,3 +1,4 @@
+import type { BridgeProvider, Message } from '../shared/schema.js';
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -11,6 +12,8 @@ const eventSchema = z.object({
   post_type: z.string().optional(),
   self_id: identifierSchema.optional(),
   message_type: z.enum(['private', 'group']),
+  message_seq: z.union([z.number().int(), z.string()]).optional(),
+  real_seq: z.union([z.number().int(), z.string()]).optional(),
   message_id: z.union([z.number().int(), z.string()]),
   user_id: identifierSchema,
   target_id: identifierSchema.optional(),
@@ -30,8 +33,10 @@ export interface QqMessage {
   segments?: MessageSegment[];
   time: number;
   mentionedSelf: boolean;
+  identities?: Message['identities'];
 }
 export interface BridgeOptions {
+  provider?: BridgeProvider;
   url: string;
   token: string;
   selfQq: string;
@@ -102,6 +107,7 @@ export function normalizeMessage(
   raw: unknown,
   selfQq: string,
   historyPeer?: string,
+  provider: BridgeProvider = 'snowluma',
 ): QqMessage | undefined {
   const result = eventSchema.safeParse(raw);
   if (!result.success) return undefined;
@@ -159,6 +165,19 @@ export function normalizeMessage(
   }
   if (!text.trim()) return undefined;
   return {
+    identities: [
+      {
+        provider,
+        account: selfQq,
+        id: String(event.message_id),
+        rawSequence: event.message_seq === undefined ? undefined : String(event.message_seq),
+        groupSequence:
+          event.message_type === 'group'
+            ? String(provider === 'napcat' ? (event.real_seq ?? '') : (event.message_seq ?? '')) ||
+              undefined
+            : undefined,
+      },
+    ],
     id: String(event.message_id),
     kind: event.message_type,
     peerId,
@@ -171,7 +190,15 @@ export function normalizeMessage(
   };
 }
 
+export class BridgeRequestError extends Error {
+  constructor(readonly providerMessage: string) {
+    super('QQ 只读接口失败');
+  }
+}
 export class QqBridge {
+  get provider(): BridgeProvider {
+    return this.options.provider ?? 'snowluma';
+  }
   connected = false;
   status = '未连接';
   private receptionCounts = { incoming: 0, selfReceived: 0, selfAccepted: 0 };
@@ -213,6 +240,8 @@ export class QqBridge {
           .object({
             echo: z.string().optional(),
             retcode: z.number().optional(),
+            message: z.string().optional(),
+            wording: z.string().optional(),
             data: z.unknown(),
           })
           .passthrough()
@@ -224,7 +253,9 @@ export class QqBridge {
           this.pending.delete(envelope.data.echo);
           if (envelope.data.retcode === 0) pending.resolve(envelope.data.data);
           else
-            pending.reject(new Error(`QQ 只读接口失败 (${envelope.data.retcode ?? '未知返回码'})`));
+            pending.reject(
+              new BridgeRequestError(envelope.data.message || envelope.data.wording || ''),
+            );
           return;
         }
         const notice = z
@@ -272,7 +303,7 @@ export class QqBridge {
           (identity.data.post_type === 'message_sent' ||
             identity.data.user_id === this.options.selfQq);
         if (fromSelf) this.receptionCounts.selfReceived++;
-        const message = normalizeMessage(raw, this.options.selfQq);
+        const message = normalizeMessage(raw, this.options.selfQq, undefined, this.provider);
         if (message) {
           if (fromSelf) this.receptionCounts.selfAccepted++;
           else if (message.senderId !== this.options.selfQq) this.receptionCounts.incoming++;
@@ -383,34 +414,51 @@ export class QqBridge {
   }
   async imageUrl(image: ImageSegment, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
-    if (!this.connected) throw new Error('读取图片需要已连接且通过账号校验的 QQ');
-    if (!image.file) {
-      if (!image.url) throw new Error('消息图片缺少文件标识或地址');
-      return image.url;
-    }
-    const result = z
-      .object({ url: z.string().min(1).max(8192) })
-      .parse(await this.request('get_image', { file: image.file }, signal));
-    return result.url;
+    if (!image.url) throw new Error('消息图片没有可下载 URL');
+    const url = new URL(image.url);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+      throw new Error('消息图片 URL 无效');
+    return image.url;
   }
+
   async history(
     peerId: string,
     cursor = 0,
     kind: 'private' | 'group' = 'private',
     signal?: AbortSignal,
-  ): Promise<{ messages: QqMessage[]; cursor: number; rawCount: number }> {
-    const data = z.object({ messages: z.array(z.unknown()).max(500) }).parse(
-      await this.request(
+    count = 100,
+  ): Promise<{ messages: QqMessage[]; cursor: number; rawCount: number; unavailable?: boolean }> {
+    let response: unknown;
+    try {
+      response = await this.request(
         kind === 'private' ? 'get_friend_msg_history' : 'get_group_msg_history',
         {
           ...(kind === 'private' ? { user_id: peerId } : { group_id: peerId }),
-          count: 100,
-          message_id: cursor,
+          count: Math.max(1, Math.min(100, count)),
+          ...(this.provider === 'napcat'
+            ? { message_seq: String(cursor) }
+            : { message_id: cursor }),
           reverse_order: true,
         },
         signal,
-      ),
-    );
+      );
+    } catch (error) {
+      // An unreadable anchor does not prove that all history was read.
+      if (
+        this.provider === 'napcat' &&
+        error instanceof BridgeRequestError &&
+        error.providerMessage === '消息' + cursor + '不存在'
+      )
+        return { messages: [], cursor, rawCount: 0, unavailable: true };
+      throw error;
+    }
+    const data = z
+      .object({
+        messages: z
+          .array(z.unknown())
+          .max(this.provider === 'napcat' ? Math.max(1, Math.min(100, count)) : 500),
+      })
+      .parse(response);
     for (const raw of data.messages) {
       const parsed = eventSchema.safeParse(raw);
       if (!parsed.success) continue;
@@ -430,7 +478,12 @@ export class QqBridge {
     }
     const messages = data.messages
       .map((raw) =>
-        normalizeMessage(raw, this.options.selfQq, kind === 'private' ? peerId : undefined),
+        normalizeMessage(
+          raw,
+          this.options.selfQq,
+          kind === 'private' ? peerId : undefined,
+          this.provider,
+        ),
       )
       .filter(
         (item): item is QqMessage =>

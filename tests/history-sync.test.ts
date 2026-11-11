@@ -348,3 +348,80 @@ test('跨批游标循环会停止自动续读，关闭后不再执行续读计�
     data.cleanup();
   }
 });
+
+test('NapCat recovery stops at 1000 scanned records without completing the missing boundary', async (context) => {
+  let calls = 0;
+  const { data, app, id } = setup(context, async () => {
+    calls++;
+    const messages = Array.from({ length: 100 }, (_, i) => message(2000 - (calls - 1) * 100 - i));
+    return page(...messages);
+  });
+  try {
+    app.receive(message(1), 'history');
+    data.store.settings = { ...data.store.settings, bridgeProvider: 'napcat' };
+    await app.history.connected();
+    assert.equal(calls, 10);
+    assert.equal(data.store.historySync(id)?.recoveryCount, 1000);
+    assert.equal(data.store.historySync(id)?.recoveryPending, true);
+    assert.match(data.store.conversation(id)!.historyStatus, /1000.*缺口/);
+    assert.equal(app.history.isSyncing(id), false);
+  } finally {
+    await app.stop();
+    data.cleanup();
+  }
+});
+
+test('NapCat older-history resume rediscovers the durable short id from the latest page', async (context) => {
+  const cursors: number[] = [];
+  const { data, app, id } = setup(context, async (_peer, cursor) => {
+    cursors.push(cursor);
+    if (cursor === 0) return page(message(10), message(9));
+    if (cursor === -9) return page(message(8));
+    return page();
+  });
+  try {
+    data.store.settings = { ...data.store.settings, bridgeProvider: 'napcat', historyPages: 3 };
+    data.store.saveHistorySync({
+      conversationId: id,
+      accountId: '10001',
+      provider: 'napcat',
+      initialCursor: -9,
+      initialDone: false,
+      recoveryPending: false,
+      recoveryCursor: 0,
+      recoveryVisited: [],
+      recoveryCount: 0,
+      boundaryId: '',
+    });
+    await app.importHistory(data.contact.id);
+    assert.deepEqual(cursors, [0, -9, -8]);
+    assert.equal(data.store.historySync(id)?.initialDone, true);
+  } finally {
+    await app.stop();
+    data.cleanup();
+  }
+});
+
+test('SnowLuma reconnect hydrates legacy metadata through the oldest stored boundary', async (context) => {
+  const { data, app, id } = setup(context, async (_peer, cursor) =>
+    cursor === 0 ? page(message(3), message(2)) : page(message(1)),
+  );
+  try {
+    for (const n of [1, 2, 3])
+      data.store.addMessage({
+        ...message(n),
+        id: 'private:12345:' + -n,
+        conversationId: id,
+        source: 'history',
+        sequence: 0,
+      });
+    await app.history.connected();
+    const messages = data.store.messages(id);
+    assert.equal(messages.length, 3);
+    assert.ok(messages.every((m) => m.identities?.[0]?.provider === 'snowluma'));
+    assert.equal(data.store.historySync(id)?.recoveryPending, false);
+  } finally {
+    await app.stop();
+    data.cleanup();
+  }
+});

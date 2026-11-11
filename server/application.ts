@@ -114,6 +114,7 @@ export class Application {
         .map(({ summary: _summary, ...conversation }) => conversation),
       hasApiKey: Boolean(this.store.secret('apiKey')),
       hasQqToken: Boolean(this.store.secret('qqToken')),
+      hasNapcatToken: Boolean(this.store.secret('napcatToken')),
       bridge: {
         connected: this.bridge?.connected ?? false,
         status: this.bridge?.status ?? '未配置 QQ 连接',
@@ -125,10 +126,12 @@ export class Application {
     this.bridge?.stop();
     this.bridge = undefined;
     const settings = this.store.settings;
-    if (this.closed || !settings.qqUrl || !settings.selfQq) return;
+    const url = settings.bridgeProvider === 'napcat' ? settings.napcatUrl : settings.qqUrl;
+    if (this.closed || !url || !settings.selfQq) return;
     this.bridge = new QqBridge({
-      url: settings.qqUrl,
-      token: this.store.secret('qqToken'),
+      provider: settings.bridgeProvider,
+      url,
+      token: this.store.secret(settings.bridgeProvider === 'napcat' ? 'napcatToken' : 'qqToken'),
       selfQq: settings.selfQq,
       onStatus: () => {},
       onMessage: (message) => this.receive(message, 'live'),
@@ -163,7 +166,17 @@ export class Application {
       const conversation = this.store.conversation(id)!;
       const added = this.store.addMessage({
         ...message,
-        id: `${message.kind}:${message.peerId}:${message.id}`,
+        identities: message.identities ?? [
+          {
+            provider: this.store.settings.bridgeProvider,
+            account: this.store.settings.selfQq,
+            id: message.id,
+          },
+        ],
+        id:
+          message.identities?.[0]?.provider === 'napcat'
+            ? `napcat:${message.kind}:${message.peerId}:${message.id}`
+            : `${message.kind}:${message.peerId}:${message.id}`,
         conversationId: id,
         source,
         sequence: 0,

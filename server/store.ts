@@ -144,6 +144,76 @@ export class Store {
 
   /** A provider message can legitimately belong to multiple object dossiers (group context). */
   addMessage(value: Message): boolean {
+    const identity = value.identities?.[0];
+    if (identity) {
+      const exact = this.database
+        .prepare(
+          "SELECT sequence,data FROM messages WHERE conversation_id=? AND (id=? OR EXISTS (SELECT 1 FROM json_each(messages.data,'$.identities') i WHERE json_extract(i.value,'$.account')=? AND json_extract(i.value,'$.provider')=? AND json_extract(i.value,'$.id')=?)) LIMIT 1",
+        )
+        .get(
+          value.conversationId,
+          value.conversationId + ':' + value.id,
+          identity.account,
+          identity.provider,
+          identity.id,
+        );
+      const nearby = this.database
+        .prepare(
+          'SELECT sequence,data FROM messages WHERE conversation_id=? AND time BETWEEN ? AND ? ORDER BY sequence LIMIT 200',
+        )
+        .all(value.conversationId, value.time - 2000, value.time + 2000);
+      const candidates = nearby.map((row) => ({
+        row,
+        message: messageSchema.parse(JSON.parse(String(row.data))),
+      }));
+      // Only group sequences have a shared meaning; private NT and sender-local sequences differ.
+      const reliable = identity.groupSequence
+        ? candidates.filter(
+            ({ message }) =>
+              message.senderId === value.senderId &&
+              message.identities?.some(
+                (i) => i.account === identity.account && i.groupSequence === identity.groupSequence,
+              ),
+          )
+        : [];
+      const match = exact ?? (reliable.length === 1 ? reliable[0]?.row : undefined);
+      if (match) {
+        const old = messageSchema.parse(JSON.parse(String(match.data)));
+        const identities = [...(old.identities ?? [])];
+        const existing = identities.findIndex(
+          (i) =>
+            i.account === identity.account &&
+            i.provider === identity.provider &&
+            i.id === identity.id,
+        );
+        if (existing >= 0) identities[existing] = { ...identities[existing], ...identity };
+        else if (identities.length < 20) identities.push(identity);
+        this.database
+          .prepare('UPDATE messages SET data=? WHERE sequence=?')
+          .run(JSON.stringify({ ...old, identities }), Number(match.sequence));
+        return false;
+      }
+      // Content is evidence, never a unique identity: repeated text and pictures are legitimate.
+      const weak = candidates.filter(
+        ({ message }) =>
+          message.senderId === value.senderId &&
+          message.time === value.time &&
+          message.text === value.text &&
+          (!message.identities?.length ||
+            message.identities.some(
+              (i) => i.account === identity.account && i.provider !== identity.provider,
+            )),
+      );
+      value = {
+        ...value,
+        associations: weak
+          .slice(0, 20)
+          .map(({ message }) => ({
+            id: message.id,
+            evidence: weak.length === 1 ? 'content-time' : 'ambiguous',
+          })),
+      };
+    }
     const result = this.database
       .prepare('INSERT OR IGNORE INTO messages(id,conversation_id,time,data) VALUES(?,?,?,?)')
       .run(
@@ -153,6 +223,34 @@ export class Store {
         JSON.stringify(value),
       );
     return result.changes > 0;
+  }
+  oldestUnmappedMessage(conversationId: string): Message | undefined {
+    const row = this.database
+      .prepare(
+        "SELECT data FROM messages WHERE conversation_id=? AND COALESCE(json_array_length(data,'$.identities'),0)=0 ORDER BY time,sequence LIMIT 1",
+      )
+      .get(conversationId);
+    return row ? messageSchema.parse(JSON.parse(String(row.data))) : undefined;
+  }
+  /** Provider aliases preserve stable message ids used by memories and recovery boundaries. */
+  messageMatches(
+    conversationId: string,
+    boundaryId: string,
+    identity: NonNullable<Message['identities']>[number],
+  ): boolean {
+    const row = this.database
+      .prepare('SELECT data FROM messages WHERE conversation_id=? AND id=?')
+      .get(conversationId, conversationId + ':' + boundaryId);
+    if (!row) return false;
+    const message = messageSchema.parse(JSON.parse(String(row.data)));
+    return (
+      message.identities?.some(
+        (i) =>
+          i.account === identity.account &&
+          i.provider === identity.provider &&
+          i.id === identity.id,
+      ) ?? false
+    );
   }
   messages(
     conversationId: string,
@@ -225,7 +323,7 @@ export class Store {
         .get(conversationId)?.count ?? 0,
     );
   }
-  setSecret(name: 'apiKey' | 'qqToken', plainText: string): void {
+  setSecret(name: 'apiKey' | 'qqToken' | 'napcatToken', plainText: string): void {
     const initializationVector = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, initializationVector);
     const encrypted = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
@@ -235,7 +333,7 @@ export class Store {
       Buffer.concat([initializationVector, cipher.getAuthTag(), encrypted]).toString('base64'),
     );
   }
-  secret(name: 'apiKey' | 'qqToken'): string {
+  secret(name: 'apiKey' | 'qqToken' | 'napcatToken'): string {
     const encoded = this.read('secret', name, z.string());
     if (!encoded) return '';
     const encrypted = Buffer.from(encoded, 'base64');

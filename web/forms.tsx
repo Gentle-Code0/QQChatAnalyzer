@@ -403,10 +403,26 @@ export function SettingsForm({
         <p className="muted small">
           测试当前填写的配置；Key 留空时使用已保存的 Key。测试会产生一次模型调用，不会保存配置。
         </p>
-        <h3>QQ · SnowLuma OneBot v11</h3>
+        <Field label="QQ 桥接服务">
+          <select
+            value={settings.bridgeProvider}
+            onChange={(event) => {
+              const provider = event.target.value;
+              if (provider === 'snowluma' || provider === 'napcat') {
+                setSettings({ ...settings, bridgeProvider: provider });
+                setQqToken('');
+              }
+            }}
+          >
+            <option value="snowluma">SnowLuma</option>
+            <option value="napcat">NapCat</option>
+          </select>
+        </Field>
+        <h3>QQ · {settings.bridgeProvider === 'napcat' ? 'NapCat' : 'SnowLuma'} OneBot v11</h3>
         <p className="muted small">
-          请在 SnowLuma 对应的 WebSocket 服务开启“自身消息上报”（reportSelfMessage），并放行
-          message_sent 事件。只显示对象发言时，先观察下方计数，再从原 QQ 客户端手动发言确认。
+          请在 {settings.bridgeProvider === 'napcat' ? 'NapCat' : 'SnowLuma'} 对应的 WebSocket
+          服务开启“自身消息上报”（reportSelfMessage），并放行 message_sent
+          事件。只显示对象发言时，先观察下方计数，再从原 QQ 客户端手动发言确认。
         </p>
         {state.bridge.reception && (
           <div className="notice" role="status">
@@ -414,7 +430,7 @@ export function SettingsForm({
             {state.bridge.reception.selfReceived} 条，成功解析 {state.bridge.reception.selfAccepted}{' '}
             条。
             <p className="small">
-              本人事件不增加：检查 SnowLuma
+              本人事件不增加：检查 {settings.bridgeProvider === 'napcat' ? 'NapCat' : 'SnowLuma'}
               的上报、事件过滤及本机客户端发言支持；本人事件增加但成功解析不增加：事件格式未通过校验。
               成功解析增加但对话未出现：检查私聊接收者与对象
               QQ、所选会话。计数仅含实时事件，重连清零，不代表历史完整度。
@@ -426,8 +442,13 @@ export function SettingsForm({
           hint="填写 QQ 所在电脑的局域网 IP 和 OneBot 正向 WebSocket 端口。"
         >
           <input
-            value={settings.qqUrl}
-            onChange={(event) => setSettings({ ...settings, qqUrl: event.target.value })}
+            value={settings.bridgeProvider === 'napcat' ? settings.napcatUrl : settings.qqUrl}
+            onChange={(event) =>
+              setSettings({
+                ...settings,
+                [settings.bridgeProvider === 'napcat' ? 'napcatUrl' : 'qqUrl']: event.target.value,
+              })
+            }
             placeholder="ws://192.168.1.10:3001"
           />
         </Field>
@@ -438,7 +459,9 @@ export function SettingsForm({
             onChange={(event) => setSettings({ ...settings, selfQq: event.target.value })}
           />
         </Field>
-        <Field label={`OneBot Access Token ${state.hasQqToken ? '· 已配置' : '· 未配置'}`}>
+        <Field
+          label={`OneBot Access Token ${(settings.bridgeProvider === 'napcat' ? state.hasNapcatToken : state.hasQqToken) ? '· 已配置' : '· 未配置'}`}
+        >
           <input
             type="password"
             autoComplete="new-password"
@@ -446,6 +469,12 @@ export function SettingsForm({
             onChange={(event) => setQqToken(event.target.value)}
           />
         </Field>
+        {settings.bridgeProvider === 'napcat' && (
+          <p className="muted small">
+            历史恢复从最新页重新扫描，最多 1000 条；未找到旧边界时保留缺口。图片仅使用消息 HTTP(S)
+            URL。
+          </p>
+        )}
         <h3>分析节奏</h3>
         <p className="muted small">
           摘要、建议判断和画像与记忆归纳独立累计消息；达到条数阈值直接检查，少量消息等待静默。摘要仅供后台

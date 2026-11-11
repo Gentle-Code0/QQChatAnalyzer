@@ -56,14 +56,22 @@ export class HistorySynchronizer {
     const { store } = this.dependencies;
     const existing = store.historySync(conversation.id);
     const accountId = store.settings.selfQq;
-    if (existing?.accountId === accountId) return existing;
+    if (existing?.accountId === accountId && existing.provider === store.settings.bridgeProvider)
+      return existing;
     const legacy =
       conversation.kind === 'private' ? store.contact(conversation.contactId) : undefined;
     return historySyncSchema.parse({
       conversationId: conversation.id,
       accountId,
-      initialCursor: legacy?.historyCursor ?? 0,
-      initialDone: legacy?.historyDone ?? false,
+      provider: store.settings.bridgeProvider,
+      initialCursor:
+        store.settings.bridgeProvider === 'snowluma' && !existing
+          ? (legacy?.historyCursor ?? 0)
+          : 0,
+      initialDone:
+        store.settings.bridgeProvider === 'snowluma' && !existing
+          ? (legacy?.historyDone ?? false)
+          : false,
     });
   }
   private recover(conversation: Conversation, state: HistorySync): void {
@@ -72,8 +80,12 @@ export class HistorySynchronizer {
       ...state,
       recoveryPending: true,
       recoveryCursor: 0,
+      recoveryCount: 0,
       recoveryVisited: [],
-      boundaryId: state.recoveryPending ? state.boundaryId : (latest?.id ?? ''),
+      boundaryId:
+        (state.provider === 'snowluma'
+          ? this.dependencies.store.oldestUnmappedMessage(conversation.id)?.id
+          : undefined) ?? (state.recoveryPending ? state.boundaryId : (latest?.id ?? '')),
     });
   }
   connected(): Promise<void> {
@@ -82,7 +94,7 @@ export class HistorySynchronizer {
     // Pin every old boundary before any newly arrived live event can become an accidental boundary.
     const targets = this.targets();
     for (const conversation of targets) {
-      const state = this.state(conversation);
+      let state = this.state(conversation);
       if (
         state.recoveryPending ||
         state.initialDone ||
@@ -217,10 +229,24 @@ export class HistorySynchronizer {
       bridge.connected &&
       store.settings.selfQq === state.accountId &&
       !!this.watched(id);
-    const visited = new Set<number>(recovering ? state.recoveryVisited : []);
+    // A persisted short id is a boundary to rediscover, never a direct request cursor.
+    let resumeAnchor = state.provider === 'napcat' ? cursor : 0;
+    let rescanCount = 0;
+    if (state.provider === 'napcat') cursor = 0;
+    const visited = new Set<number>(
+      state.provider === 'napcat' ? [] : recovering ? state.recoveryVisited : [],
+    );
     this.status(id, recovering ? '正在自动补读断线缺口…' : '正在读取历史…');
     try {
       for (let page = 0; page < store.settings.historyPages && valid(); page++) {
+        if (
+          state.provider === 'napcat' &&
+          ((recovering && state.recoveryCount >= 1000) ||
+            (resumeAnchor !== 0 && rescanCount >= 1000))
+        ) {
+          this.status(id, 'NapCat 已重新扫描 1000 条，未找到可靠旧边界；可能仍有缺口');
+          return;
+        }
         if (visited.has(cursor)) {
           this.status(id, '分页锚点出现循环，可能仍有缺口；重连或点击重试');
           return;
@@ -231,8 +257,18 @@ export class HistorySynchronizer {
           cursor,
           conversation.kind,
           controller.signal,
+          state.provider === 'napcat'
+            ? Math.min(
+                100,
+                1000 - (recovering ? state.recoveryCount : resumeAnchor !== 0 ? rescanCount : 0),
+              )
+            : 100,
         );
         if (!valid()) return;
+        if (batch.unavailable) {
+          this.status(id, '已到 NapCat 当前接口可读范围（锚点不可读）；可能仍有缺口，未标记完整');
+          return;
+        }
         const imported = new Set<string>();
         for (const message of batch.messages)
           for (const conversationId of this.dependencies.receive(message)) {
@@ -244,14 +280,44 @@ export class HistorySynchronizer {
           recovering &&
           !!state.boundaryId &&
           batch.messages.some(
-            (message) => `${message.kind}:${message.peerId}:${message.id}` === state.boundaryId,
+            (message) =>
+              (message.identities?.some((identity) =>
+                store.messageMatches(id, state.boundaryId, identity),
+              ) ??
+                false) ||
+              (state.provider === 'snowluma' &&
+                `${message.kind}:${message.peerId}:${message.id}` === state.boundaryId),
           );
+        rescanCount += batch.rawCount;
+        if (resumeAnchor !== 0) {
+          const found = batch.messages.some((message) => Number(message.id) === resumeAnchor);
+          if (
+            !found &&
+            batch.rawCount > 0 &&
+            batch.cursor !== cursor &&
+            !visited.has(batch.cursor)
+          ) {
+            cursor = batch.cursor;
+            if (recovering) {
+              state = { ...state, recoveryCount: state.recoveryCount + batch.rawCount };
+              store.saveHistorySync(state);
+            }
+            page--; // Rediscovery has its own 1000-message budget, independent of backfill page batches.
+            continue;
+          }
+          if (!found) {
+            this.status(id, 'NapCat 重新扫描未找到旧历史锚点，可能仍有缺口');
+            return;
+          }
+          resumeAnchor = 0;
+        }
         const ended = batch.rawCount === 0;
         const stalled = !ended && (batch.cursor === cursor || visited.has(batch.cursor));
         state = recovering
           ? {
               ...state,
               recoveryCursor: batch.cursor,
+              recoveryCount: state.recoveryCount + batch.rawCount,
               recoveryVisited: [...visited].slice(-1000),
               recoveryPending: !(matched || (ended && !state.boundaryId)),
             }
@@ -279,6 +345,10 @@ export class HistorySynchronizer {
         }
       }
       if (!valid()) return;
+      if (state.provider === 'napcat' && recovering && state.recoveryCount >= 1000) {
+        this.status(id, 'NapCat 已重新扫描 1000 条，未找到可靠旧边界；可能仍有缺口');
+        return;
+      }
       if (recovering && automatic) {
         this.status(id, '达到本批分页上限；已保存补读进度，将自动继续');
         this.continue(id, historySyncTiming.continuationMs);
