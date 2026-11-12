@@ -196,7 +196,6 @@ function App() {
           ))}
         </div>
         <div className="sidebar-bottom">
-          <span className="pill">微信 · TODO</span>
           <p>为理解留一点空间。</p>
           <button className="subtle" onClick={() => void action('/logout')}>
             退出登录

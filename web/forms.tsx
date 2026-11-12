@@ -403,6 +403,7 @@ export function SettingsForm({
         <p className="muted small">
           测试当前填写的配置；Key 留空时使用已保存的 Key。测试会产生一次模型调用，不会保存配置。
         </p>
+        <hr className="form-divider" />
         <Field label="QQ 桥接服务">
           <select
             value={settings.bridgeProvider}
@@ -418,7 +419,9 @@ export function SettingsForm({
             <option value="napcat">NapCat</option>
           </select>
         </Field>
-        <h3>QQ · {settings.bridgeProvider === 'napcat' ? 'NapCat' : 'SnowLuma'} OneBot v11</h3>
+        <h3 className="bridge-heading">
+          QQ · {settings.bridgeProvider === 'napcat' ? 'NapCat' : 'SnowLuma'} OneBot v11
+        </h3>
         <p className="muted small">
           请在 {settings.bridgeProvider === 'napcat' ? 'NapCat' : 'SnowLuma'} 对应的 WebSocket
           服务开启“自身消息上报”（reportSelfMessage），并放行 message_sent
