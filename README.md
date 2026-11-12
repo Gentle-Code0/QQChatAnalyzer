@@ -142,3 +142,11 @@ npm run build
 ## 结构
 
 `shared/schema.ts` 定义跨层契约；`server/store.ts` 管理持久化和加密；`bridge.ts` 管理只读 WebSocket；`ai.ts` 封装模型；`engine.ts` 管理分析任务；`application.ts` 编排导入和生命周期；`http.ts` 提供认证 API；`web/` 为 React 界面。
+
+## 许可证
+
+Copyright (C) 2026 GentleCode
+
+本项目采用 [GNU Affero General Public License v3.0（AGPL-3.0-only）](LICENSE)，仅适用第 3 版。项目地址：[Gentle-Code0/QQChatAnalyzer](https://github.com/Gentle-Code0/QQChatAnalyzer)。
+
+允许在遵守协议的前提下使用、修改、分发及商业使用。分发时须保留版权与许可声明，并按协议提供对应源码；修改后的版本如允许用户通过网络交互，须向这些用户显著提供获取该版本对应源码的途径。本项目不提供任何担保，具体权利与义务以 [LICENSE](LICENSE) 全文为准。第三方依赖仍遵循各自的许可证。
